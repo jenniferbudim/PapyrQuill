@@ -1,0 +1,55 @@
+name: papyrquill
+description: PapyrQuill - offline-first story writing app (Android + Windows).
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # Rich text editor (replaces richeditor-compose) and HTML parsing for the
+  # HTML <-> editor conversion in lib/editor/html_codec.dart
+  flutter_quill: ^11.0.0
+  html: ^0.15.5
+
+  # Local database (replaces Room)
+  drift: ^2.20.0
+  drift_flutter: ^0.2.0
+  path_provider: ^2.1.4
+
+  # Networking (replaces Retrofit/OkHttp)
+  dio: ^5.7.0
+
+  # State management (replaces ViewModel + Flow)
+  flutter_riverpod: ^2.5.1
+
+  # DOCX export: share sheet on Android, save dialog on Windows
+  share_plus: ^13.0.0
+  file_picker: ^13.0.0
+
+  # Stores the server address
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  drift_dev: ^2.20.0
+  build_runner: ^2.4.12
+  flutter_launcher_icons: 0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/icon.png"

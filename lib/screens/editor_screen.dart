@@ -1,0 +1,512 @@
+import 'dart:async';
+import 'dart:ui' show AppExitResponse;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_quill/flutter_quill.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../data/app_database.dart';
+import '../editor/document_html.dart';
+import '../export/docx_exporter.dart';
+import '../providers.dart';
+import '../repository/papyr_repository.dart';
+import '../theme/app_theme.dart';
+import '../widgets/rename_dialog.dart';
+import '../widgets/unsaved_dialog.dart';
+
+/// Port of EditorScreen.kt + EditorViewModel.kt.
+///
+/// Behavior carried over from the Android app:
+///  - opens the local copy immediately, then pulls the latest chapter from the
+///    server;
+///  - auto-saves 2 seconds after typing stops, and on back / manual save;
+///  - toolbar: bold, italic, underline, strikethrough, alignment cycle,
+///    bulleted list, save; undo / redo and share in the app bar.
+///
+/// Differences:
+///  - undo/redo uses flutter_quill's built-in history instead of the manual
+///    snapshot stacks;
+///  - server content that arrives after load is only applied if you haven't
+///    started typing yet, so it can't overwrite your edits;
+///  - also saves when the app goes to the background, and Ctrl+S works on
+///    Windows.
+class EditorScreen extends ConsumerStatefulWidget {
+  const EditorScreen({super.key, required this.chapterId});
+
+  final int chapterId;
+
+  @override
+  ConsumerState<EditorScreen> createState() => _EditorScreenState();
+}
+
+class _EditorScreenState extends ConsumerState<EditorScreen>
+    with WidgetsBindingObserver {
+  static const _autoSaveDelay = Duration(seconds: 2);
+
+  /// Space between the text and the left / right screen edge.
+  static const double _sideMargin = 32;
+
+  /// Editor text size relative to the default.
+  static const double _textZoom = 1.25;
+
+  late final PapyrRepository _repo;
+  QuillController? _controller;
+  StreamSubscription<dynamic>? _changesSub;
+  Timer? _saveTimer;
+
+  Chapter? _chapter;
+  String _lastSavedHtml = '';
+
+  /// True when the user has edited since the last load or save. Backed by a
+  /// notifier so the back-button guard (PopScope) reacts to changes.
+  final ValueNotifier<bool> _dirtyNotifier = ValueNotifier<bool>(false);
+  bool get _dirty => _dirtyNotifier.value;
+  set _dirty(bool value) => _dirtyNotifier.value = value;
+
+  /// Asks before the Windows window is closed with unsaved changes.
+  AppLifecycleListener? _exitListener;
+
+  @override
+  void initState() {
+    super.initState();
+    _repo = ref.read(repositoryProvider);
+    WidgetsBinding.instance.addObserver(this);
+    _exitListener = AppLifecycleListener(onExitRequested: _onExitRequested);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _saveTimer?.cancel();
+    // _save reads the document synchronously before its first await, so it is
+    // safe to dispose the controller right after starting it.
+    unawaited(_save());
+    _changesSub?.cancel();
+    _exitListener?.dispose();
+    _controller?.dispose();
+    _dirtyNotifier.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      unawaited(_save());
+    }
+  }
+
+  // ── Loading ───────────────────────────────────────────────────────────────
+
+  Future<void> _load() async {
+    // 1. Local copy first, so the editor isn't blank while waiting.
+    final local = await _repo.getChapterById(widget.chapterId);
+    if (!mounted || local == null) return;
+    _chapter = local;
+
+    final controller = QuillController(
+      document: htmlToDocument(local.contentHtml),
+      selection: const TextSelection.collapsed(offset: 0),
+    );
+    _controller = controller;
+    _lastSavedHtml = documentToHtml(controller.document);
+    _listenToChanges();
+    setState(() {});
+
+    // 2. Latest copy from the server (may have been edited elsewhere).
+    final fresh = await _repo.refreshChapter(widget.chapterId);
+    if (!mounted || fresh == null) return;
+    _chapter = fresh;
+    if (!_dirty && fresh.contentHtml != local.contentHtml) {
+      _replaceContent(fresh.contentHtml);
+    }
+    setState(() {});
+  }
+
+  void _listenToChanges() {
+    _changesSub?.cancel();
+    _changesSub = _controller?.document.changes.listen((_) {
+      _dirty = true;
+      _saveTimer?.cancel();
+      _saveTimer = Timer(_autoSaveDelay, () => unawaited(_save()));
+    });
+  }
+
+  void _replaceContent(String html) {
+    final controller = _controller;
+    if (controller == null) return;
+    _changesSub?.cancel();
+    final document = htmlToDocument(html);
+    controller.document = document;
+    controller.updateSelection(
+      const TextSelection.collapsed(offset: 0),
+      ChangeSource.local,
+    );
+    _lastSavedHtml = documentToHtml(document);
+    _dirty = false;
+    _listenToChanges();
+  }
+
+  // ── Saving ────────────────────────────────────────────────────────────────
+
+  Future<void> _save() async {
+    _saveTimer?.cancel();
+    final controller = _controller;
+    final chapter = _chapter;
+    if (controller == null || chapter == null || !_dirty) return;
+
+    final html = documentToHtml(controller.document);
+    _dirty = false;
+    if (html == _lastSavedHtml) return;
+
+    _lastSavedHtml = html;
+    final updated = chapter.copyWith(contentHtml: html);
+    _chapter = updated;
+    await _repo.updateChapter(updated);
+  }
+
+  // ── Leaving with unsaved changes ──────────────────────────────────────────
+
+  /// Back button / swipe back while there are unsaved changes.
+  Future<void> _onBackWithUnsaved() async {
+    final choice = await askUnsavedChanges(context);
+    if (!mounted) return;
+    switch (choice) {
+      case LeaveChoice.save:
+        await _save();
+        if (mounted) Navigator.of(context).pop();
+      case LeaveChoice.discard:
+        _saveTimer?.cancel();
+        _dirty = false; // dispose() then has nothing to save
+        Navigator.of(context).pop();
+      case LeaveChoice.keepEditing:
+        break;
+    }
+  }
+
+  /// The Windows window's close button. (Not sent on Android, where leaving
+  /// the app is covered by the auto-save and the save on going to background.)
+  Future<AppExitResponse> _onExitRequested() async {
+    if (!_dirty || !mounted) return AppExitResponse.exit;
+    switch (await askUnsavedChanges(context)) {
+      case LeaveChoice.save:
+        await _save();
+        return AppExitResponse.exit;
+      case LeaveChoice.discard:
+        _saveTimer?.cancel();
+        _dirty = false;
+        return AppExitResponse.exit;
+      case LeaveChoice.keepEditing:
+        return AppExitResponse.cancel;
+    }
+  }
+
+  /// Renames the chapter. Any typing not yet saved is saved first, so the
+  /// rename never writes an older copy of the text.
+  Future<void> _rename() async {
+    final chapter = _chapter;
+    if (chapter == null) return;
+    final title = await askChapterTitle(context, chapter.title);
+    if (title == null || !mounted) return;
+    await _save();
+    final latest = _chapter ?? chapter;
+    final updated = latest.copyWith(title: title);
+    setState(() => _chapter = updated);
+    await _repo.updateChapter(updated);
+  }
+
+  Future<void> _manualSave() async {
+    await _save();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text('Saved'), duration: Duration(seconds: 1)),
+      );
+  }
+
+  /// Exports what is on screen right now (including unsaved edits).
+  Future<void> _shareDocx() async {
+    final controller = _controller;
+    if (controller == null) return;
+    final title = _chapter?.title ?? 'Chapter';
+    final bytes = buildChapterDocx(
+      title,
+      controller.document.toDelta().toJson(),
+    );
+    await deliverDocx(context, title: title, bytes: bytes);
+  }
+
+  // ── Formatting ────────────────────────────────────────────────────────────
+
+  void _toggle(QuillController c, Attribute attribute) {
+    final active = c.getSelectionStyle().attributes.containsKey(attribute.key);
+    c.formatSelection(active ? Attribute.clone(attribute, null) : attribute);
+  }
+
+  void _toggleBullets(QuillController c) {
+    final current = c.getSelectionStyle().attributes[Attribute.list.key];
+    final active = current == Attribute.ul;
+    c.formatSelection(active ? Attribute.clone(Attribute.ul, null) : Attribute.ul);
+  }
+
+  /// Cycles left -> center -> right -> justify -> left, like the Android app.
+  void _cycleAlignment(QuillController c) {
+    final current =
+        c.getSelectionStyle().attributes[Attribute.align.key]?.value as String?;
+    switch (current) {
+      case null:
+      case 'left':
+        c.formatSelection(Attribute.centerAlignment);
+      case 'center':
+        c.formatSelection(Attribute.rightAlignment);
+      case 'right':
+        c.formatSelection(Attribute.justifyAlignment);
+      default:
+        // Back to left: remove the alignment attribute.
+        c.formatSelection(Attribute.clone(Attribute.align, null));
+    }
+  }
+
+  // ── UI ────────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _dirtyNotifier,
+      builder: (context, dirty, child) => PopScope(
+        canPop: !dirty,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) unawaited(_onBackWithUnsaved());
+        },
+        child: child!,
+      ),
+      child: _buildEditor(context),
+    );
+  }
+
+  Widget _buildEditor(BuildContext context) {
+    final controller = _controller;
+
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true):
+            _manualSave,
+      },
+      child: Scaffold(
+        backgroundColor: colorBackground,
+        appBar: AppBar(
+          backgroundColor: mediumPink,
+          foregroundColor: darkPink,
+          title: InkWell(
+            onTap: _chapter == null ? null : () => unawaited(_rename()),
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      _chapter?.title ?? 'Loading...',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: darkPink,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ),
+                  if (_chapter != null) ...[
+                    const SizedBox(width: 6),
+                    Icon(Icons.edit,
+                        size: 16, color: darkPink.withValues(alpha: 0.6)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            if (controller != null)
+              ListenableBuilder(
+                listenable: controller,
+                builder: (context, _) => Row(
+                  children: [
+                    IconButton(
+                      tooltip: 'Undo',
+                      icon: const Icon(Icons.undo),
+                      onPressed: controller.hasUndo ? controller.undo : null,
+                    ),
+                    IconButton(
+                      tooltip: 'Redo',
+                      icon: const Icon(Icons.redo),
+                      onPressed: controller.hasRedo ? controller.redo : null,
+                    ),
+                  ],
+                ),
+              ),
+            IconButton(
+              tooltip: 'Share as DOCX',
+              icon: const Icon(Icons.share),
+              onPressed: () => unawaited(_shareDocx()),
+            ),
+          ],
+        ),
+        body: controller == null
+            ? const Center(child: CircularProgressIndicator())
+            : Center(
+                // Keeps lines a comfortable length on wide Windows windows.
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 820),
+                  // Text is 25% larger than the editor's default (on top of
+                  // any font size set in the phone's settings).
+                  child: MediaQuery(
+                    data: MediaQuery.of(context).copyWith(
+                      textScaler: TextScaler.linear(
+                        MediaQuery.textScalerOf(context).scale(1) *
+                            _textZoom,
+                      ),
+                    ),
+                    child: QuillEditor.basic(
+                      controller: controller,
+                      config: const QuillEditorConfig(
+                        placeholder: 'Start writing your story…',
+                        expands: true,
+                        autoFocus: false,
+                        // The margin is inside the editor, so tapping it
+                        // still places the cursor, while the text stays well
+                        // away from the screen edge (and Android's edge
+                        // swipe-back gesture).
+                        padding: EdgeInsets.symmetric(
+                          horizontal: _sideMargin,
+                          vertical: 16,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+        bottomNavigationBar:
+            controller == null ? null : _buildToolbar(controller),
+      ),
+    );
+  }
+
+  Widget _buildToolbar(QuillController c) {
+    return Material(
+      color: mediumPink,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          // Buttons must not take focus, or clicking one on Windows would
+          // pull the cursor out of the editor.
+          child: Focus(
+            canRequestFocus: false,
+            descendantsAreFocusable: false,
+            child: ListenableBuilder(
+            listenable: c,
+            builder: (context, _) {
+              final attrs = c.getSelectionStyle().attributes;
+              bool has(Attribute a) => attrs.containsKey(a.key);
+
+              final align = attrs[Attribute.align.key]?.value as String?;
+              final alignIcon = switch (align) {
+                'center' => Icons.format_align_center,
+                'right' => Icons.format_align_right,
+                'justify' => Icons.format_align_justify,
+                _ => Icons.format_align_left,
+              };
+              final alignLabel = switch (align) {
+                'center' => 'Align center',
+                'right' => 'Align right',
+                'justify' => 'Justify',
+                _ => 'Align left',
+              };
+
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _ToolbarButton(
+                    icon: Icons.format_bold,
+                    tooltip: 'Bold (Ctrl+B)',
+                    active: has(Attribute.bold),
+                    onPressed: () => _toggle(c, Attribute.bold),
+                  ),
+                  _ToolbarButton(
+                    icon: Icons.format_italic,
+                    tooltip: 'Italic (Ctrl+I)',
+                    active: has(Attribute.italic),
+                    onPressed: () => _toggle(c, Attribute.italic),
+                  ),
+                  _ToolbarButton(
+                    icon: Icons.format_underlined,
+                    tooltip: 'Underline (Ctrl+U)',
+                    active: has(Attribute.underline),
+                    onPressed: () => _toggle(c, Attribute.underline),
+                  ),
+                  _ToolbarButton(
+                    icon: Icons.format_strikethrough,
+                    tooltip: 'Strikethrough',
+                    active: has(Attribute.strikeThrough),
+                    onPressed: () => _toggle(c, Attribute.strikeThrough),
+                  ),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: darkPink.withValues(alpha: 0.4),
+                  ),
+                  _ToolbarButton(
+                    icon: alignIcon,
+                    tooltip: alignLabel,
+                    onPressed: () => _cycleAlignment(c),
+                  ),
+                  _ToolbarButton(
+                    icon: Icons.format_list_bulleted,
+                    tooltip: 'Bulleted list',
+                    active: attrs[Attribute.list.key] == Attribute.ul,
+                    onPressed: () => _toggleBullets(c),
+                  ),
+                  _ToolbarButton(
+                    icon: Icons.save,
+                    tooltip: 'Save (Ctrl+S)',
+                    onPressed: _manualSave,
+                  ),
+                ],
+              );
+            },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolbarButton extends StatelessWidget {
+  const _ToolbarButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      style: IconButton.styleFrom(
+        backgroundColor: active ? lighterPink : Colors.transparent,
+      ),
+      icon: Icon(icon, color: darkPink),
+    );
+  }
+}
