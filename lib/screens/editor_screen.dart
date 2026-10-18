@@ -11,6 +11,8 @@ import '../editor/document_html.dart';
 import '../export/docx_exporter.dart';
 import '../providers.dart';
 import '../repository/papyr_repository.dart';
+import '../spell/spell_check_dialog.dart';
+import '../spell/spell_checker.dart';
 import '../theme/app_theme.dart';
 import '../widgets/desktop_shell.dart';
 import '../widgets/rename_dialog.dart';
@@ -147,19 +149,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     if (applied) {
       _replaceContent(fresh.contentHtml);
     }
-    // TEMPORARY diagnostics (the Windows exe has no console): shows what the
-    // server sent and what was done with it. Remove once sync is confirmed.
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-        duration: const Duration(seconds: 8),
-        content: Text(
-          'Sync check: server text ${fresh.contentHtml.length} chars, '
-          'local copy ${local.contentHtml.length} chars, '
-          '${typed ? "you had typed already" : applied ? "server text applied" : "nothing to change"}. '
-          'Editor now has ${_controller?.document.toPlainText().trim().length ?? 0} letters.',
-        ),
-      ));
     setState(() {});
   }
 
@@ -279,6 +268,36 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
       ..showSnackBar(
         const SnackBar(content: Text('Saved'), duration: Duration(seconds: 1)),
       );
+  }
+
+  /// "Check spelling": walks through the unknown words, one at a time.
+  Future<void> _checkSpelling() async {
+    final controller = _controller;
+    if (controller == null) return;
+    final SpellChecker checker;
+    try {
+      checker = await SpellChecker.load();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text('The dictionary could not be loaded.'),
+        ));
+      return;
+    }
+    if (!mounted) return;
+    if (checker.findMisspellings(controller.document.toPlainText(), limit: 1)
+        .isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text('No spelling mistakes found.'),
+          duration: Duration(seconds: 2),
+        ));
+      return;
+    }
+    await showSpellCheck(context, controller, checker);
   }
 
   /// Exports what is on screen right now (including unsaved edits).
@@ -589,6 +608,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                     tooltip: 'Bulleted list',
                     active: attrs[Attribute.list.key] == Attribute.ul,
                     onPressed: () => _toggleBullets(c),
+                  ),
+                  _ToolbarButton(
+                    icon: Icons.spellcheck,
+                    tooltip: 'Check spelling',
+                    onPressed: () => unawaited(_checkSpelling()),
                   ),
                   _ToolbarButton(
                     icon: Icons.save,
