@@ -55,6 +55,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   /// The order you just dropped, shown until the database stream catches up.
   List<Chapter>? _orderOverride;
 
+  Future<bool> Function()? _previousLeaveGuard;
+
   /// Asks before the Windows window is closed with an unsaved title edit.
   AppLifecycleListener? _exitListener;
 
@@ -62,6 +64,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   void initState() {
     super.initState();
     _exitListener = AppLifecycleListener(onExitRequested: _onExitRequested);
+    _previousLeaveGuard = desktopLeaveGuard;
+    desktopLeaveGuard = _confirmLeave;
     _repo = ref.read(repositoryProvider);
     _actions = ref.read(documentActionsProvider);
     // Pull the latest from the server. The database streams update the UI.
@@ -70,6 +74,10 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
 
   @override
   void dispose() {
+    // Hand the check back to the screen underneath, if there is one.
+    if (desktopLeaveGuard == _confirmLeave) {
+      desktopLeaveGuard = _previousLeaveGuard;
+    }
     _exitListener?.dispose();
     _chapterScroll.dispose();
     _titleController.dispose();
@@ -117,6 +125,26 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
         Navigator.of(context).pop();
       case LeaveChoice.keepEditing:
         break;
+    }
+  }
+
+  /// Clicking the logo or another story on Windows: true if it is fine to
+  /// leave.
+  Future<bool> _confirmLeave() async {
+    if (!mounted || !_hasUnsavedEdits) return true;
+    final choice = await askUnsavedChanges(
+      context,
+      message: 'Your title or description changes are not saved yet. '
+          'Save them before leaving?',
+    );
+    switch (choice) {
+      case LeaveChoice.save:
+        await _saveOpenEdits();
+        return true;
+      case LeaveChoice.discard:
+        return true;
+      case LeaveChoice.keepEditing:
+        return false;
     }
   }
 
@@ -256,8 +284,9 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   // ── Windows layout ───────────────────────────────────────────────────────
 
   /// Switches to another story from the sidebar without an animation.
-  void _switchStory(Story target) {
+  Future<void> _switchStory(Story target) async {
     if (target.id == _storyId) return;
+    if (!await _confirmLeave() || !mounted) return;
     Navigator.of(context).pushReplacement(
       instantRoute<void>(DocumentScreen(storyId: target.id), name: 'document'),
     );

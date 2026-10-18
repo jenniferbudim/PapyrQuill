@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
@@ -22,7 +24,18 @@ class RemoteDataSource {
   ) async {
     try {
       final response = await request();
-      final body = response.data;
+      var body = response.data;
+      if (body is String) {
+        try {
+          body = jsonDecode(body);
+        } on FormatException {
+          // Not JSON: usually a PHP error or warning printed by the server.
+          final text = body.length > 600 ? body.substring(0, 600) : body;
+          debugPrint('$_tag $operation: server did not return JSON '
+              '(HTTP ${response.statusCode}). Start of reply:\n$text');
+          return null;
+        }
+      }
       if (body is Map && body['success'] == true) {
         final data = body['data'];
         return data == null ? null : parse(data);
@@ -31,7 +44,13 @@ class RemoteDataSource {
       debugPrint('$_tag $operation failed: HTTP ${response.statusCode} - $error');
       return null;
     } on DioException catch (e) {
-      debugPrint('$_tag $operation error: ${e.message}');
+      // message is often null, so also print the type, the underlying error
+      // and the start of whatever the server sent back.
+      final raw = e.response?.data?.toString() ?? '';
+      final snippet = raw.length > 300 ? raw.substring(0, 300) : raw;
+      debugPrint('$_tag $operation error: type=${e.type.name} '
+          'message=${e.message} error=${e.error} '
+          'status=${e.response?.statusCode} body=$snippet');
       return null;
     } catch (e) {
       debugPrint('$_tag $operation error: $e');

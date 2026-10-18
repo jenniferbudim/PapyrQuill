@@ -26,6 +26,11 @@ Route<T> instantRoute<T>(Widget page, {String? name}) => PageRouteBuilder<T>(
 
 const double kSidebarWidth = 170;
 
+/// Set by a screen that can have unsaved work. It returns true when it is fine
+/// to leave (nothing to save, or the user chose Save / Discard) and false when
+/// the user chose to keep editing. The screen clears it again when it closes.
+Future<bool> Function()? desktopLeaveGuard;
+
 /// The left column of every Windows screen: the logo on beige, an optional
 /// list underneath, then the pink and dark pink strips, then [child].
 class DesktopShell extends StatelessWidget {
@@ -48,11 +53,24 @@ class DesktopShell extends StatelessWidget {
             child: Column(
               children: [
                 const SizedBox(height: 30),
-                Image.asset(
-                  'assets/images/logo.png',
-                  width: 118,
-                  fit: BoxFit.contain,
-                  semanticLabel: 'Papyr Quill',
+                // Clicking the logo goes back to the Home screen.
+                Tooltip(
+                  message: 'Home',
+                  child: InkWell(
+                    onTap: () async {
+                      // Give the current screen a chance to ask about unsaved
+                      // changes first.
+                      final ok = await desktopLeaveGuard?.call() ?? true;
+                      if (!ok || !context.mounted) return;
+                      Navigator.of(context).popUntil((route) => route.isFirst);
+                    },
+                    child: Image.asset(
+                      'assets/images/logo.png',
+                      width: 118,
+                      fit: BoxFit.contain,
+                      semanticLabel: 'Papyr Quill',
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 26),
                 Expanded(child: sidebar ?? const SizedBox.shrink()),

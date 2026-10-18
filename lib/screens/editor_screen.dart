@@ -65,6 +65,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   bool get _dirty => _dirtyNotifier.value;
   set _dirty(bool value) => _dirtyNotifier.value = value;
 
+  Future<bool> Function()? _previousLeaveGuard;
+
   /// Asks before the Windows window is closed with unsaved changes.
   AppLifecycleListener? _exitListener;
 
@@ -74,12 +76,18 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _repo = ref.read(repositoryProvider);
     WidgetsBinding.instance.addObserver(this);
     _exitListener = AppLifecycleListener(onExitRequested: _onExitRequested);
+    _previousLeaveGuard = desktopLeaveGuard;
+    desktopLeaveGuard = _confirmLeave;
     _load();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // Hand the check back to the screen underneath, if there is one.
+    if (desktopLeaveGuard == _confirmLeave) {
+      desktopLeaveGuard = _previousLeaveGuard;
+    }
     _saveTimer?.cancel();
     // _save reads the document synchronously before its first await, so it is
     // safe to dispose the controller right after starting it.
@@ -118,9 +126,24 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
 
     // 2. Latest copy from the server (may have been edited elsewhere).
     final fresh = await _repo.refreshChapter(widget.chapterId);
-    if (!mounted || fresh == null) return;
+    if (!mounted) return;
+    if (fresh == null) {
+      // Say so instead of silently showing an old (maybe empty) copy.
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text(
+              'Could not load the latest text from the server. Showing the '
+              'copy saved on this device.'),
+        ));
+      return;
+    }
     _chapter = fresh;
-    if (!_dirty && fresh.contentHtml != local.contentHtml) {
+    // "Has the user typed anything yet?" is answered by comparing the text,
+    // not by the dirty flag, which an editor event could set by itself.
+    final c = _controller;
+    final typed = c != null && documentToHtml(c.document) != _lastSavedHtml;
+    if (!typed && fresh.contentHtml != local.contentHtml) {
       _replaceContent(fresh.contentHtml);
     }
     setState(() {});
@@ -184,6 +207,22 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
         Navigator.of(context).pop();
       case LeaveChoice.keepEditing:
         break;
+    }
+  }
+
+  /// Clicking the logo on Windows: true if it is fine to leave.
+  Future<bool> _confirmLeave() async {
+    if (!_dirty || !mounted) return true;
+    switch (await askUnsavedChanges(context)) {
+      case LeaveChoice.save:
+        await _save();
+        return true;
+      case LeaveChoice.discard:
+        _saveTimer?.cancel();
+        _dirty = false;
+        return true;
+      case LeaveChoice.keepEditing:
+        return false;
     }
   }
 

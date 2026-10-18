@@ -15,6 +15,9 @@ class ApiConfig {
             receiveTimeout: const Duration(seconds: 30),
             sendTimeout: const Duration(seconds: 30),
             contentType: Headers.jsonContentType,
+            // Read the reply as text and decode it ourselves, so a PHP error
+            // page can be shown in the log instead of a vague FormatException.
+            responseType: ResponseType.plain,
             // Let the data source read error bodies instead of throwing.
             validateStatus: (_) => true,
           ),
@@ -23,7 +26,7 @@ class ApiConfig {
   static const _key = 'api_base_url';
 
   /// Same default the Android app shipped with. Change it in the app.
-  static const defaultBaseUrl = 'http://192.168.72.143/papyrquill/api/';
+  static const defaultBaseUrl = 'http://192.168.1.11/papyrquill/api/';
 
   /// Null when preferences could not be opened (the address is then not
   /// remembered between launches, but the app still starts).
