@@ -25,12 +25,26 @@ class ApiConfig {
   /// Same default the Android app shipped with. Change it in the app.
   static const defaultBaseUrl = 'http://192.168.72.143/papyrquill/api/';
 
-  final SharedPreferences _prefs;
+  /// Null when preferences could not be opened (the address is then not
+  /// remembered between launches, but the app still starts).
+  final SharedPreferences? _prefs;
   final Dio dio;
 
   static Future<ApiConfig> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    return ApiConfig._(prefs, _normalize(prefs.getString(_key) ?? defaultBaseUrl));
+    SharedPreferences? prefs;
+    try {
+      prefs = await SharedPreferences.getInstance();
+    } catch (_) {
+      // A broken plugin build must not leave the app on a black screen.
+      prefs = null;
+    }
+    String? saved;
+    try {
+      saved = prefs?.getString(_key);
+    } catch (_) {
+      saved = null;
+    }
+    return ApiConfig._(prefs, _normalize(saved ?? defaultBaseUrl));
   }
 
   String get baseUrl => dio.options.baseUrl;
@@ -38,7 +52,11 @@ class ApiConfig {
   Future<void> setBaseUrl(String url) async {
     final normalized = _normalize(url);
     dio.options.baseUrl = normalized;
-    await _prefs.setString(_key, normalized);
+    try {
+      await _prefs?.setString(_key, normalized);
+    } catch (_) {
+      // Keep the new address for this run even if it cannot be saved.
+    }
   }
 
   static String _normalize(String url) {

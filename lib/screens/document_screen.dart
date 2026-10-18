@@ -10,6 +10,7 @@ import '../export/docx_exporter.dart';
 import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
+import '../widgets/desktop_shell.dart';
 import '../widgets/rename_dialog.dart';
 import '../widgets/unsaved_dialog.dart';
 import 'character_group_screen.dart';
@@ -42,6 +43,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   int get _storyId => _repo.resolveStoryId(widget.storyId);
 
 
+  final _chapterScroll = ScrollController();
   final _titleController = TextEditingController();
   final _descriptionController = TextEditingController();
   bool _editingTitle = false;
@@ -69,6 +71,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   @override
   void dispose() {
     _exitListener?.dispose();
+    _chapterScroll.dispose();
     _titleController.dispose();
     _descriptionController.dispose();
     super.dispose();
@@ -250,6 +253,163 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     if (confirmed == true) await _actions.deleteChapter(chapter);
   }
 
+  // ── Windows layout ───────────────────────────────────────────────────────
+
+  /// Switches to another story from the sidebar without an animation.
+  void _switchStory(Story target) {
+    if (target.id == _storyId) return;
+    Navigator.of(context).pushReplacement(
+      instantRoute<void>(DocumentScreen(storyId: target.id), name: 'document'),
+    );
+  }
+
+  Widget _chapterSliver(
+    List<Chapter> shown,
+    EdgeInsets padding, {
+    bool compact = false,
+  }) {
+    return SliverPadding(
+      padding: padding,
+      sliver: SliverReorderableList(
+        itemCount: shown.length,
+        onReorderStart: (i) => setState(() => _draggingIndex = i),
+        onReorderEnd: (_) => setState(() => _draggingIndex = null),
+        onReorder: (oldIndex, newIndex) =>
+            _onReorder(shown, oldIndex, newIndex),
+        proxyDecorator: (child, index, animation) => Material(
+          color: Colors.transparent,
+          elevation: 8,
+          borderRadius: BorderRadius.circular(compact ? 8 : 14),
+          child: child,
+        ),
+        itemBuilder: (context, index) {
+          final chapter = shown[index];
+          return Padding(
+            key: ValueKey(chapter.id),
+            padding: EdgeInsets.only(bottom: compact ? 11 : 8),
+            child: _ChapterCard(
+              chapter: chapter,
+              index: index,
+              compact: compact,
+              isDragging: _draggingIndex == index,
+              onTap: () => _openChapter(chapter),
+              onRename: () => _rename(chapter),
+              onDelete: () => _confirmDelete(chapter),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildDesktop(Story? story, List<Chapter> shown) {
+    final stories =
+        ref.watch(storiesProvider).valueOrNull ?? const <Story>[];
+    final selected = stories.indexWhere((s) => s.id == _storyId);
+
+    Widget navImage(String asset, String label, VoidCallback onTap) {
+      return InkWell(
+        onTap: onTap,
+        child: Tooltip(
+          message: label,
+          child: SizedBox(
+            width: 66,
+            height: 70,
+            child: Image.asset(
+              asset,
+              fit: BoxFit.contain,
+              alignment: Alignment.bottomCenter,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return PopScope(
+      canPop: !(_editingTitle || _editingDescription),
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_onBackWhileEditing());
+      },
+      child: Scaffold(
+        backgroundColor: colorBackground,
+        body: DesktopShell(
+          sidebar: SidebarList(
+            labels: [for (final s in stories) s.title],
+            selectedIndex: selected,
+            onTap: (i) => _switchStory(stories[i]),
+          ),
+          child: Stack(
+            children: [
+              Column(
+                children: [
+                  _buildHeader(story, shown, desktop: true),
+                  Expanded(
+                    child: ScrollbarTheme(
+                      data: const ScrollbarThemeData(
+                        thumbColor: WidgetStatePropertyAll(desktopScrollThumb),
+                        thickness: WidgetStatePropertyAll(6.0),
+                        radius: Radius.circular(3),
+                        crossAxisMargin: 12,
+                      ),
+                      child: Scrollbar(
+                        controller: _chapterScroll,
+                        thumbVisibility: true,
+                        child: CustomScrollView(
+                          controller: _chapterScroll,
+                          slivers: [
+                            _chapterSliver(
+                              shown,
+                              const EdgeInsets.fromLTRB(40, 18, 130, 110),
+                              compact: true,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              // Bookmark = characters, hourglass = timeline.
+              Positioned(
+                left: 22,
+                bottom: 0,
+                child: Row(
+                  children: [
+                    navImage('assets/images/bookmark.png', 'Characters',
+                        _openCharacters),
+                    const SizedBox(width: 6),
+                    navImage(
+                        'assets/images/hour.png', 'Timeline', _openTimeline),
+                  ],
+                ),
+              ),
+              Positioned(
+                right: 22,
+                bottom: 20,
+                child: Tooltip(
+                  message: 'Add Chapter',
+                  child: Material(
+                    color: mediumPink,
+                    borderRadius: BorderRadius.circular(16),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: _showAddChapterDialog,
+                      child: const SizedBox(
+                        width: 48,
+                        height: 48,
+                        child: Icon(Icons.add, size: 30, color: darkPink),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -267,6 +427,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     });
 
     final shown = _orderOverride ?? chapters;
+
+    if (useDesktopLayout(context)) return _buildDesktop(story, shown);
 
     final width = MediaQuery.sizeOf(context).width;
     final sidePadding =
@@ -367,14 +529,15 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     );
   }
 
-  Widget _buildHeader(Story? story, List<Chapter> shown) {
-    const titleStyle = TextStyle(
+  Widget _buildHeader(Story? story, List<Chapter> shown,
+      {bool desktop = false}) {
+    final titleStyle = TextStyle(
       fontWeight: FontWeight.w400,
-      fontSize: 30,
+      fontSize: desktop ? 27 : 30,
       color: headerTitleColor,
     );
-    const descriptionStyle = TextStyle(
-      fontSize: 14,
+    final descriptionStyle = TextStyle(
+      fontSize: desktop ? 12 : 14,
       height: 1.45,
       color: headerBodyColor,
     );
@@ -388,19 +551,24 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     return Material(
       color: headerCardPink,
       // Soft rounded bottom corners, like the reference card.
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(bottom: Radius.circular(24)),
+      shape: RoundedRectangleBorder(
+        borderRadius: desktop
+            ? BorderRadius.zero
+            : const BorderRadius.vertical(bottom: Radius.circular(24)),
       ),
       clipBehavior: Clip.antiAlias,
       child: SafeArea(
         bottom: false,
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: _maxContentWidth),
+            constraints: BoxConstraints(
+                maxWidth: desktop ? double.infinity : _maxContentWidth),
             child: Stack(
               children: [
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 24, 56, 24),
+                  padding: desktop
+                      ? const EdgeInsets.fromLTRB(44, 26, 72, 22)
+                      : const EdgeInsets.fromLTRB(24, 24, 56, 24),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -490,7 +658,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                                 ? story!.previewText
                                 : 'Tap to add a description...',
                             style: descriptionStyle,
-                            maxLines: 4,
+                            maxLines: desktop ? 2 : 4,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -498,8 +666,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                   ),
                 ),
                 Positioned(
-                  top: 12,
-                  right: 4,
+                  top: desktop ? 14 : 12,
+                  right: desktop ? 20 : 4,
                   child: IconButton(
                     tooltip: 'Share',
                     icon: const Icon(Icons.share_outlined, color: mediumPink),
@@ -538,7 +706,11 @@ class _ChapterCard extends StatelessWidget {
     required this.onTap,
     required this.onRename,
     required this.onDelete,
+    this.compact = false,
   });
+
+  /// Windows look: smaller, flatter card.
+  final bool compact;
 
   final Chapter chapter;
   final int index;
@@ -555,13 +727,15 @@ class _ChapterCard extends StatelessWidget {
       margin: EdgeInsets.zero,
       elevation: 0,
       clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(compact ? 8 : 14)),
       color: isDragging ? mediumPink : cardBeige,
       child: InkWell(
         onTap: onTap,
         onLongPress: onDelete,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+          padding: EdgeInsets.symmetric(
+              horizontal: compact ? 14 : 12, vertical: compact ? 11 : 14),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -587,21 +761,23 @@ class _ChapterCard extends StatelessWidget {
                   children: [
                     Text(
                       chapter.title,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
+                      style: TextStyle(
+                        fontWeight:
+                            compact ? FontWeight.w500 : FontWeight.bold,
+                        fontSize: compact ? 14 : 16,
                         color: cardTitleColor,
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       preview.isEmpty ? 'No content yet...' : preview,
-                      maxLines: 4,
+                      maxLines: compact ? 2 : 4,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        height: 18 / 13,
-                        color: cardBodyColor,
+                      style: TextStyle(
+                        fontSize: compact ? 11 : 13,
+                        height: compact ? 1.4 : 18 / 13,
+                        color:
+                            compact ? desktopPreviewColor : cardBodyColor,
                       ),
                     ),
                   ],

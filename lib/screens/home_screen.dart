@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/app_database.dart';
 import '../providers.dart';
 import '../theme/app_theme.dart';
+import '../widgets/desktop_shell.dart';
 import 'document_screen.dart';
 
 /// Port of HomeScreen.kt + HomeViewModel.kt.
@@ -23,11 +24,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   static const _maxContentWidth = 820.0;
 
   final _searchController = TextEditingController();
+  final _scroll = ScrollController();
   String _query = '';
 
   @override
   void dispose() {
     _searchController.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -228,12 +231,165 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  // ── Windows layout ───────────────────────────────────────────────────────
+
+  Widget _desktopSearchBar() {
+    return Row(
+      children: [
+        Expanded(
+          child: SizedBox(
+            height: 38,
+            child: TextField(
+              controller: _searchController,
+              onChanged: (v) => setState(() => _query = v),
+              style: const TextStyle(color: desktopSearchText, fontSize: 14),
+              cursorColor: desktopSearchText,
+              decoration: InputDecoration(
+                hintText: 'Search documents',
+                hintStyle:
+                    const TextStyle(color: desktopSearchText, fontSize: 14),
+                prefixIcon:
+                    const Icon(Icons.search, color: desktopSearchIcon),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear',
+                        icon: const Icon(Icons.close,
+                            size: 18, color: desktopSearchIcon),
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() => _query = '');
+                        },
+                      ),
+                filled: true,
+                fillColor: mediumPink,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 9),
+                border: const OutlineInputBorder(
+                  borderRadius: BorderRadius.all(Radius.circular(8)),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        IconButton(
+          tooltip: 'Sync now',
+          icon: const Icon(Icons.sync, color: darkPink),
+          onPressed: () =>
+              ref.read(repositoryProvider).refreshStories(),
+        ),
+        IconButton(
+          tooltip: 'Server settings',
+          icon: const Icon(Icons.settings, color: darkPink),
+          onPressed: _showServerDialog,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDesktop(AsyncValue<List<Story>> stories) {
+    final repo = ref.read(repositoryProvider);
+    return Scaffold(
+      backgroundColor: colorBackground,
+      body: DesktopShell(
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(31, 22, 24, 12),
+                  child: _desktopSearchBar(),
+                ),
+                Expanded(
+                  child: stories.when(
+                    loading: () =>
+                        const Center(child: CircularProgressIndicator()),
+                    error: (e, _) => Center(child: Text('Error: $e')),
+                    data: (all) {
+                      final list = _filter(all);
+                      if (list.isEmpty) {
+                        return Center(
+                          child: Text(
+                            all.isEmpty
+                                ? 'No stories yet. Click + to add one.'
+                                : 'No stories match your search.',
+                            style: const TextStyle(color: cardBodyColor),
+                          ),
+                        );
+                      }
+                      return ScrollbarTheme(
+                        data: const ScrollbarThemeData(
+                          thumbColor:
+                              WidgetStatePropertyAll(desktopScrollThumb),
+                          thickness: WidgetStatePropertyAll(6.0),
+                          radius: Radius.circular(3),
+                          crossAxisMargin: 12,
+                        ),
+                        child: Scrollbar(
+                          controller: _scroll,
+                          thumbVisibility: true,
+                          child: ListView.builder(
+                            controller: _scroll,
+                            padding: const EdgeInsets.fromLTRB(31, 0, 85, 100),
+                            itemCount: list.length,
+                            itemBuilder: (context, i) {
+                              final story = list[i];
+                              return _StoryCard(
+                                key: ValueKey(story.id),
+                                story: story,
+                                desktop: true,
+                                onTap: () => _openStory(story),
+                                onDelete: () => _confirmDelete(story),
+                                onToggleFavorite: () => repo.updateStory(
+                                  story.copyWith(
+                                      isFavorite: !story.isFavorite),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+            Positioned(
+              right: 22,
+              bottom: 20,
+              child: Tooltip(
+                message: 'Add New Story',
+                child: Material(
+                  color: mediumPink,
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: _showAddDialog,
+                    child: const SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: Icon(Icons.add, size: 30, color: darkPink),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // First time only: send rows created offline, then pull the story list.
     ref.watch(startupSyncProvider);
     final stories = ref.watch(storiesProvider);
     final repo = ref.watch(repositoryProvider);
+
+    if (useDesktopLayout(context)) return _buildDesktop(stories);
 
     final width = MediaQuery.sizeOf(context).width;
     final side =
@@ -318,7 +474,11 @@ class _StoryCard extends StatelessWidget {
     required this.onTap,
     required this.onDelete,
     required this.onToggleFavorite,
+    this.desktop = false,
   });
+
+  /// Windows look: flatter, smaller text, lighter preview.
+  final bool desktop;
 
   final Story story;
   final VoidCallback onTap;
@@ -328,10 +488,10 @@ class _StoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: EdgeInsets.symmetric(vertical: desktop ? 6 : 6),
       child: Material(
         color: cardBeige,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(desktop ? 8 : 14),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
@@ -339,7 +499,9 @@ class _StoryCard extends StatelessWidget {
           // Right-click is the mouse equivalent on Windows.
           onSecondaryTap: onDelete,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 4, 14),
+            padding: desktop
+                ? const EdgeInsets.fromLTRB(16, 13, 6, 13)
+                : const EdgeInsets.fromLTRB(16, 14, 4, 14),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -349,9 +511,10 @@ class _StoryCard extends StatelessWidget {
                     children: [
                       Text(
                         story.title,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
+                        style: TextStyle(
+                          fontWeight:
+                              desktop ? FontWeight.w400 : FontWeight.bold,
+                          fontSize: desktop ? 15 : 16,
                           color: cardTitleColor,
                           letterSpacing: 0.2,
                         ),
@@ -361,12 +524,13 @@ class _StoryCard extends StatelessWidget {
                         story.previewText.isEmpty
                             ? 'No content yet...'
                             : story.previewText,
-                        maxLines: 4,
+                        maxLines: desktop ? 2 : 4,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          height: 18 / 13,
-                          color: cardBodyColor,
+                        style: TextStyle(
+                          fontSize: desktop ? 11 : 13,
+                          height: desktop ? 1.4 : 18 / 13,
+                          color:
+                              desktop ? desktopPreviewColor : cardBodyColor,
                         ),
                       ),
                     ],
@@ -377,7 +541,9 @@ class _StoryCard extends StatelessWidget {
                   onPressed: onToggleFavorite,
                   icon: Icon(
                     story.isFavorite ? Icons.favorite : Icons.favorite_border,
-                    color: story.isFavorite ? heartActive : heartInactive,
+                    color: story.isFavorite
+                        ? heartActive
+                        : heartInactive.withValues(alpha: desktop ? 0.45 : 1),
                   ),
                 ),
               ],

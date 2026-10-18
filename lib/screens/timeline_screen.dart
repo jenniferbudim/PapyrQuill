@@ -8,6 +8,7 @@ import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/book_top_header.dart' show backToDocument;
+import '../widgets/desktop_shell.dart';
 import 'timeline_actions.dart';
 
 /// Port of TimelineScreen.kt + TimelineViewModel.kt.
@@ -159,6 +160,10 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
     }
     unassigned.sort((a, b) => a.documentOrder.compareTo(b.documentOrder));
 
+    if (useDesktopLayout(context)) {
+      return _buildDesktop(frames, byFrame, unassigned);
+    }
+
     final width = MediaQuery.sizeOf(context).width;
     // viewPadding (not padding) so the layout does not change when the
     // keyboard opens.
@@ -231,6 +236,69 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Windows look: the card on the right of the sidebar with a soft shadow,
+  /// the hourglass bottom left and a thin pink bar along the bottom.
+  Widget _buildDesktop(
+    List<TimelineFrame> frames,
+    Map<int, List<Chapter>> byFrame,
+    List<Chapter> unassigned,
+  ) {
+    const barHeight = 18.0;
+    return Scaffold(
+      backgroundColor: colorBackground,
+      resizeToAvoidBottomInset: false,
+      body: DesktopShell(
+        child: Stack(
+          children: [
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: barHeight,
+              child: const ColoredBox(color: mediumPink),
+            ),
+            Positioned.fill(
+              child: Padding(
+                padding:
+                    const EdgeInsets.fromLTRB(40, 28, 40, barHeight + 22),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: _buildCard(frames, byFrame, unassigned),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 16,
+              bottom: barHeight - 1,
+              child: InkWell(
+                onTap: () => backToDocument(context),
+                child: Tooltip(
+                  message: 'Back to the document',
+                  child: Image.asset(
+                    'assets/images/hour.png',
+                    width: 80,
+                    height: 80,
+                    fit: BoxFit.contain,
+                    filterQuality: FilterQuality.none,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

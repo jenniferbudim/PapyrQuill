@@ -8,6 +8,8 @@ import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/book_top_header.dart';
+import '../widgets/desktop_book.dart';
+import '../widgets/desktop_shell.dart';
 import 'character_actions.dart';
 import 'character_group_screen.dart';
 
@@ -186,6 +188,143 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
     );
   }
 
+  // ── Windows layout ───────────────────────────────────────────────────────
+
+  Widget _buildDesktop(
+    List<CharacterGroup> groups,
+    List<StoryCharacter> characters,
+    CharacterGroup? selectedGroup,
+  ) {
+    return Scaffold(
+      backgroundColor: colorBackground,
+      body: DesktopShell(
+        child: DesktopBook(
+          onBookmarkClick: () => backToDocument(context),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                top: DesktopBook.arcBottom + 24,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(60, 0, 60, 14),
+                      child: Row(
+                        children: [
+                          Tooltip(
+                            message: 'Add character',
+                            child: InkWell(
+                              onTap: _addCharacter,
+                              borderRadius: BorderRadius.circular(6),
+                              child: const Padding(
+                                padding: EdgeInsets.all(2),
+                                child:
+                                    Icon(Icons.add, color: darkPink, size: 24),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              selectedGroup?.name ?? '',
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: darkPink,
+                              ),
+                            ),
+                          ),
+                          if (selectedGroup != null)
+                            PopupMenuButton<String>(
+                              tooltip: 'Group options',
+                              icon: Icon(Icons.more_vert,
+                                  color: darkPink.withValues(alpha: 0.6)),
+                              onSelected: (value) {
+                                if (value == 'delete') {
+                                  _confirmDeleteGroup(selectedGroup, groups);
+                                }
+                              },
+                              itemBuilder: (context) => const [
+                                PopupMenuItem(
+                                  value: 'delete',
+                                  child: Text('Delete group'),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: characters.isEmpty
+                          ? _buildEmpty()
+                          : SingleChildScrollView(
+                              padding:
+                                  const EdgeInsets.fromLTRB(60, 0, 60, 120),
+                              child: Wrap(
+                                spacing: 36,
+                                runSpacing: 12,
+                                crossAxisAlignment: WrapCrossAlignment.start,
+                                children: [
+                                  for (final character in characters)
+                                    SizedBox(
+                                      width: 340,
+                                      child: _CharacterCard(
+                                        key: ValueKey(character.id),
+                                        character: character,
+                                        onEdit: () =>
+                                            _editCharacter(character),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              Positioned(
+                left: 28,
+                right: 28,
+                bottom: 0,
+                child: SizedBox(
+                  height: 82,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    children: [
+                      for (final group in groups)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: _ArchTab(
+                            tooltip: group.name,
+                            color:
+                                group.id == _groupId ? darkPink : mediumPink,
+                            icon: groupIcon(group.iconIndex),
+                            iconColor: group.id == _groupId
+                                ? colorBackground
+                                : Colors.black.withValues(alpha: 0.7),
+                            onTap: () =>
+                                setState(() => _selectedGroupId = group.id),
+                          ),
+                        ),
+                      _ArchTab(
+                        tooltip: 'Add character group',
+                        color: lighterPink,
+                        icon: Icons.add,
+                        iconColor: darkPink,
+                        onTap: _openGroupPicker,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -197,6 +336,10 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
             const <StoryCharacter>[];
     final selectedGroup =
         groups.where((g) => g.id == _groupId).firstOrNull;
+
+    if (useDesktopLayout(context)) {
+      return _buildDesktop(groups, characters, selectedGroup);
+    }
 
     final width = MediaQuery.sizeOf(context).width;
     final sidePadding =

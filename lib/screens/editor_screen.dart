@@ -12,6 +12,7 @@ import '../export/docx_exporter.dart';
 import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
+import '../widgets/desktop_shell.dart';
 import '../widgets/rename_dialog.dart';
 import '../widgets/unsaved_dialog.dart';
 
@@ -289,6 +290,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
 
   Widget _buildEditor(BuildContext context) {
     final controller = _controller;
+    if (useDesktopLayout(context)) return _buildDesktop(context, controller);
 
     return CallbackShortcuts(
       bindings: {
@@ -394,7 +396,71 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     );
   }
 
-  Widget _buildToolbar(QuillController c) {
+  // ── Windows layout ───────────────────────────────────────────────────────
+
+  /// Opens another chapter of the same story from the sidebar.
+  Future<void> _switchChapter(Chapter target) async {
+    if (target.id == _chapter?.id) return;
+    await _save();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      instantRoute<void>(EditorScreen(chapterId: target.id)),
+    );
+  }
+
+  Widget _buildDesktop(BuildContext context, QuillController? controller) {
+    final storyId = _chapter?.storyId;
+    final chapters = storyId == null
+        ? const <Chapter>[]
+        : ref.watch(chaptersProvider(storyId)).valueOrNull ??
+            const <Chapter>[];
+    final selected = chapters.indexWhere((c) => c.id == _chapter?.id);
+
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true):
+            _manualSave,
+      },
+      child: Scaffold(
+        backgroundColor: colorBackground,
+        body: DesktopShell(
+          sidebar: SidebarList(
+            labels: [for (final c in chapters) c.title],
+            selectedIndex: selected,
+            onTap: (i) => unawaited(_switchChapter(chapters[i])),
+          ),
+          child: controller == null
+              ? const Center(child: CircularProgressIndicator())
+              : Column(
+                  children: [
+                    _buildToolbar(controller, desktop: true),
+                    Expanded(
+                      child: MediaQuery(
+                        data: MediaQuery.of(context).copyWith(
+                          textScaler: TextScaler.linear(
+                            MediaQuery.textScalerOf(context).scale(1) *
+                                _textZoom,
+                          ),
+                        ),
+                        child: QuillEditor.basic(
+                          controller: controller,
+                          config: const QuillEditorConfig(
+                            placeholder: 'Start writing your story…',
+                            expands: true,
+                            autoFocus: false,
+                            padding: EdgeInsets.fromLTRB(40, 24, 40, 24),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildToolbar(QuillController c, {bool desktop = false}) {
     return Material(
       color: mediumPink,
       child: SafeArea(
@@ -427,7 +493,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
               };
 
               return Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                mainAxisAlignment: desktop
+                    ? MainAxisAlignment.start
+                    : MainAxisAlignment.spaceEvenly,
                 children: [
                   _ToolbarButton(
                     icon: Icons.format_bold,
@@ -474,6 +542,24 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                     tooltip: 'Save (Ctrl+S)',
                     onPressed: _manualSave,
                   ),
+                  if (desktop) ...[
+                    const Spacer(),
+                    _ToolbarButton(
+                      icon: Icons.undo,
+                      tooltip: 'Undo',
+                      onPressed: c.hasUndo ? c.undo : () {},
+                    ),
+                    _ToolbarButton(
+                      icon: Icons.redo,
+                      tooltip: 'Redo',
+                      onPressed: c.hasRedo ? c.redo : () {},
+                    ),
+                    _ToolbarButton(
+                      icon: Icons.share,
+                      tooltip: 'Share as DOCX',
+                      onPressed: () => unawaited(_shareDocx()),
+                    ),
+                  ],
                 ],
               );
             },

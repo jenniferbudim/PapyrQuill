@@ -8,6 +8,8 @@ import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/book_top_header.dart';
+import '../widgets/desktop_book.dart';
+import '../widgets/desktop_shell.dart';
 import 'character_actions.dart';
 import 'character_screen.dart';
 
@@ -75,6 +77,8 @@ class _CharacterGroupScreenState extends ConsumerState<CharacterGroupScreen> {
   Widget build(BuildContext context) {
     final groups = ref.watch(groupsProvider(_storyId)).valueOrNull ??
         const <CharacterGroup>[];
+    if (useDesktopLayout(context)) return _buildDesktop(groups);
+
     final width = MediaQuery.sizeOf(context).width;
     final sidePadding =
         width > _maxContentWidth + 56 ? (width - _maxContentWidth) / 2 : 28.0;
@@ -131,6 +135,62 @@ class _CharacterGroupScreenState extends ConsumerState<CharacterGroupScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Windows look: groups as tiles laid out across the open book.
+  Widget _buildDesktop(List<CharacterGroup> groups) {
+    return Scaffold(
+      backgroundColor: colorBackground,
+      body: DesktopShell(
+        child: DesktopBook(
+          onBookmarkClick: () => backToDocument(context),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                top: DesktopBook.arcBottom + 30,
+                child: groups.isEmpty
+                    ? _buildEmpty()
+                    : GridView.builder(
+                        padding: const EdgeInsets.fromLTRB(70, 10, 70, 110),
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 130,
+                          mainAxisSpacing: 28,
+                          crossAxisSpacing: 28,
+                        ),
+                        itemCount: groups.length,
+                        itemBuilder: (context, i) => _GroupTile(
+                          group: groups[i],
+                          onTap: () => _openGroup(groups[i].id),
+                        ),
+                      ),
+              ),
+              Positioned(
+                left: 28,
+                bottom: 0,
+                child: Tooltip(
+                  message: 'Add character group',
+                  child: Material(
+                    color: darkPink,
+                    borderRadius: archTabShape,
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => _createGroup(groups.length),
+                      child: const SizedBox(
+                        width: 70,
+                        height: 100,
+                        child:
+                            Icon(Icons.add, color: colorBackground, size: 28),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

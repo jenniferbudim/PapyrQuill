@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
 
 // Colors ported from ui/theme/Color.kt.
@@ -19,6 +20,15 @@ const timelineTitleColor = Color(0xFF7F4279);
 const timelineFrameNameColor = Color(0xFF8D5286);
 const timelineChipTextColor = Color(0xFF4A1F45);
 const timelineScrollThumb = Color(0xFFC3A1B5);
+// Windows (desktop) layouts.
+const sidebarSelected = Color(0xFFCBC0A7);
+const sidebarDivider = Color(0xFF765766);
+const desktopPreviewColor = Color(0xFFA58E9E);
+const desktopSearchText = Color(0xFF860B52);
+const desktopSearchIcon = Color(0xFF70425D);
+const desktopScrollThumb = Color(0xFFCCC8BE);
+const bookCream = Color(0xFFFFF4D7);
+const bookShade = Color(0xFFF8E5EF);
 const heartActive = Color(0xFFE91E63);
 const heartInactive = Color(0xFF9E9E9E);
 
@@ -33,6 +43,18 @@ ThemeData buildAppTheme() {
     useMaterial3: true,
     colorScheme: scheme,
     scaffoldBackgroundColor: colorBackground,
+    // Screens slide in from the right and the old one shifts left slightly,
+    // on every platform (instead of Android's fade/zoom). Swiping from the
+    // left edge goes back.
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.linux: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+      },
+    ),
     appBarTheme: const AppBarTheme(
       backgroundColor: colorBackground,
       foregroundColor: cardTitleColor,
