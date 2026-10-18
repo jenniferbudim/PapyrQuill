@@ -57,6 +57,7 @@ class DesktopShell extends StatelessWidget {
                 Tooltip(
                   message: 'Home',
                   child: InkWell(
+                    canRequestFocus: false,
                     onTap: () async {
                       // Give the current screen a chance to ask about unsaved
                       // changes first.
@@ -111,7 +112,10 @@ class SidebarList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
+    // The rows must never take keyboard focus, or the arrow keys would move a
+    // highlight through the list instead of the text cursor.
+    return ExcludeFocus(
+      child: ListView(
       padding: EdgeInsets.zero,
       children: [
         _line(),
@@ -121,6 +125,7 @@ class SidebarList extends StatelessWidget {
               Material(
                 color: i == selectedIndex ? sidebarSelected : Colors.transparent,
                 child: InkWell(
+                  canRequestFocus: false,
                   onTap: () => onTap(i),
                   onSecondaryTap:
                       onSecondaryTap == null ? null : () => onSecondaryTap!(i),
@@ -144,6 +149,7 @@ class SidebarList extends StatelessWidget {
             ],
           ),
       ],
+    ),
     );
   }
 }
