@@ -143,9 +143,23 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     // not by the dirty flag, which an editor event could set by itself.
     final c = _controller;
     final typed = c != null && documentToHtml(c.document) != _lastSavedHtml;
-    if (!typed && fresh.contentHtml != local.contentHtml) {
+    final applied = !typed && fresh.contentHtml != local.contentHtml;
+    if (applied) {
       _replaceContent(fresh.contentHtml);
     }
+    // TEMPORARY diagnostics (the Windows exe has no console): shows what the
+    // server sent and what was done with it. Remove once sync is confirmed.
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text(
+          'Sync check: server text ${fresh.contentHtml.length} chars, '
+          'local copy ${local.contentHtml.length} chars, '
+          '${typed ? "you had typed already" : applied ? "server text applied" : "nothing to change"}. '
+          'Editor now has ${_controller?.document.toPlainText().trim().length ?? 0} letters.',
+        ),
+      ));
     setState(() {});
   }
 
