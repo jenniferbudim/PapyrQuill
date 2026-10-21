@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 
 // Colors ported from ui/theme/Color.kt.
@@ -32,6 +33,11 @@ const bookShade = Color(0xFFF8E5EF);
 const heartActive = Color(0xFFE91E63);
 const heartInactive = Color(0xFF9E9E9E);
 
+bool get _isDesktop =>
+    defaultTargetPlatform == TargetPlatform.windows ||
+    defaultTargetPlatform == TargetPlatform.linux ||
+    defaultTargetPlatform == TargetPlatform.macOS;
+
 ThemeData buildAppTheme() {
   final scheme = ColorScheme.fromSeed(
     seedColor: mediumPink,
@@ -41,6 +47,9 @@ ThemeData buildAppTheme() {
   );
   return ThemeData(
     useMaterial3: true,
+    // The Windows app uses the Handlee handwriting font everywhere; Android
+    // keeps its normal font.
+    fontFamily: _isDesktop ? 'Handlee' : null,
     colorScheme: scheme,
     scaffoldBackgroundColor: colorBackground,
     // Screens slide in from the right and the old one shifts left slightly,
