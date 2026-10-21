@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform, ValueNotifier;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart';
