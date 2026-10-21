@@ -292,6 +292,9 @@ class PapyrRepository {
   Stream<List<StoryCharacter>> getCharactersForGroup(int groupId) =>
       _db.watchCharactersForGroup(resolveGroupId(groupId));
 
+  Stream<List<StoryCharacter>> getCharactersForStory(int storyId) =>
+      _db.watchCharactersForStory(resolveStoryId(storyId));
+
   Future<int> insertCharacter(StoryCharacter character) async {
     final id = _newTempId();
     await _db.insertNewCharacter(

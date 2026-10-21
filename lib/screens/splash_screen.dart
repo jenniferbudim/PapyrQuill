@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers.dart';
+import '../widgets/app_tabs.dart';
+import '../widgets/desktop_shell.dart';
 import '../widgets/paper_background.dart';
 import 'home_screen.dart';
 
@@ -30,7 +32,11 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         PageRouteBuilder<void>(
-          pageBuilder: (_, __, ___) => const HomeScreen(),
+          // Windows (desktop) gets browser-style tabs; phones go straight to
+          // Home.
+          pageBuilder: (_, __, ___) => isDesktopPlatform()
+              ? TabsHost(homeBuilder: () => const HomeScreen())
+              : const HomeScreen(),
           transitionsBuilder: (_, animation, __, child) =>
               FadeTransition(opacity: animation, child: child),
         ),

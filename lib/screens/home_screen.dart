@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/app_database.dart';
 import '../providers.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_tabs.dart';
 import '../widgets/desktop_shell.dart';
 import 'document_screen.dart';
 
@@ -136,6 +137,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         builder: (_) => DocumentScreen(storyId: story.id),
       ),
     );
+  }
+
+  /// Windows tabs: middle-click or Ctrl+click on a story.
+  void _openStoryInNewTab(Story story) {
+    openInNewTab(context, [
+      TabPage(DocumentScreen(storyId: story.id), routeName: 'document'),
+    ]);
   }
 
   Future<void> _showServerDialog() async {
@@ -294,6 +302,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return Scaffold(
       backgroundColor: colorBackground,
       body: DesktopShell(
+        title: 'Home',
         child: Stack(
           children: [
             Column(
@@ -336,16 +345,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             itemCount: list.length,
                             itemBuilder: (context, i) {
                               final story = list[i];
-                              return _StoryCard(
+                              return MiddleClickable(
                                 key: ValueKey(story.id),
+                                onMiddleClick: () => _openStoryInNewTab(story),
+                                child: _StoryCard(
                                 story: story,
                                 desktop: true,
-                                onTap: () => _openStory(story),
+                                onTap: () => isCtrlPressed()
+                                    ? _openStoryInNewTab(story)
+                                    : _openStory(story),
                                 onDelete: () => _confirmDelete(story),
                                 onToggleFavorite: () => repo.updateStory(
                                   story.copyWith(
                                       isFavorite: !story.isFavorite),
                                 ),
+                              ),
                               );
                             },
                           ),

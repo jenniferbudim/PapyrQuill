@@ -252,6 +252,8 @@ class _TimelineScreenState extends ConsumerState<TimelineScreen> {
       backgroundColor: colorBackground,
       resizeToAvoidBottomInset: false,
       body: DesktopShell(
+        title:
+            '${ref.watch(storyProvider(_storyId)).valueOrNull?.title ?? ''} · Timeline',
         child: Stack(
           children: [
             Positioned(

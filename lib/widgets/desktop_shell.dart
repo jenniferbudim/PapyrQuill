@@ -2,16 +2,20 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import 'app_tabs.dart';
 
 /// True when the Windows (desktop) layouts should be used: a desktop platform
 /// and a window wide enough for the sidebar. Tests and phones use the mobile
 /// layouts.
-bool useDesktopLayout(BuildContext context) {
+bool useDesktopLayout(BuildContext context) =>
+    isDesktopPlatform() && MediaQuery.sizeOf(context).width >= 700;
+
+/// True on Windows, Linux and macOS (where the tabs are used).
+bool isDesktopPlatform() {
   final p = defaultTargetPlatform;
-  final desktop = p == TargetPlatform.windows ||
+  return p == TargetPlatform.windows ||
       p == TargetPlatform.linux ||
       p == TargetPlatform.macOS;
-  return desktop && MediaQuery.sizeOf(context).width >= 700;
 }
 
 /// A page route that swaps screens without any animation, used when the
@@ -26,24 +30,27 @@ Route<T> instantRoute<T>(Widget page, {String? name}) => PageRouteBuilder<T>(
 
 const double kSidebarWidth = 170;
 
-/// Set by a screen that can have unsaved work. It returns true when it is fine
-/// to leave (nothing to save, or the user chose Save / Discard) and false when
-/// the user chose to keep editing. The screen clears it again when it closes.
-Future<bool> Function()? desktopLeaveGuard;
-
 /// The left column of every Windows screen: the logo on beige, an optional
 /// list underneath, then the pink and dark pink strips, then [child].
 class DesktopShell extends StatelessWidget {
-  const DesktopShell({super.key, required this.child, this.sidebar});
+  const DesktopShell({
+    super.key,
+    required this.child,
+    this.sidebar,
+    this.title,
+  });
 
   final Widget child;
+
+  /// Shown on this screen's tab.
+  final String? title;
 
   /// Shown under the logo (for example the list of stories).
   final Widget? sidebar;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final row = Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SizedBox(
@@ -61,7 +68,7 @@ class DesktopShell extends StatelessWidget {
                     onTap: () async {
                       // Give the current screen a chance to ask about unsaved
                       // changes first.
-                      final ok = await desktopLeaveGuard?.call() ?? true;
+                      final ok = await LeaveGuardHolder.of(context).check?.call() ?? true;
                       if (!ok || !context.mounted) return;
                       Navigator.of(context).popUntil((route) => route.isFirst);
                     },
@@ -84,6 +91,8 @@ class DesktopShell extends StatelessWidget {
         Expanded(child: child),
       ],
     );
+    final tabTitle = title;
+    return tabTitle == null ? row : TabTitle(title: tabTitle, child: row);
   }
 }
 
@@ -95,6 +104,7 @@ class SidebarList extends StatelessWidget {
     required this.selectedIndex,
     required this.onTap,
     this.onSecondaryTap,
+    this.onOpenInNewTab,
   });
 
   final List<String> labels;
@@ -103,6 +113,9 @@ class SidebarList extends StatelessWidget {
 
   /// Right-click on a row (for example "rename").
   final void Function(int index)? onSecondaryTap;
+
+  /// Middle-click or Ctrl+click on a row: open it in a new tab.
+  final void Function(int index)? onOpenInNewTab;
 
   Widget _line() => Container(
         height: 1,
@@ -124,9 +137,17 @@ class SidebarList extends StatelessWidget {
             children: [
               Material(
                 color: i == selectedIndex ? sidebarSelected : Colors.transparent,
-                child: InkWell(
+                child: MiddleClickable(
+                  onMiddleClick: () => onOpenInNewTab?.call(i),
+                  child: InkWell(
                   canRequestFocus: false,
-                  onTap: () => onTap(i),
+                  onTap: () {
+                    if (onOpenInNewTab != null && isCtrlPressed()) {
+                      onOpenInNewTab!(i);
+                    } else {
+                      onTap(i);
+                    }
+                  },
                   onSecondaryTap:
                       onSecondaryTap == null ? null : () => onSecondaryTap!(i),
                   child: Container(
@@ -143,6 +164,7 @@ class SidebarList extends StatelessWidget {
                       ),
                     ),
                   ),
+                ),
                 ),
               ),
               _line(),

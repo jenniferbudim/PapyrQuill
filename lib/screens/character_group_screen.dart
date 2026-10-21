@@ -144,6 +144,8 @@ class _CharacterGroupScreenState extends ConsumerState<CharacterGroupScreen> {
     return Scaffold(
       backgroundColor: colorBackground,
       body: DesktopShell(
+        title:
+            '${ref.watch(storyProvider(_storyId)).valueOrNull?.title ?? ''} · Characters',
         child: DesktopBook(
           onBookmarkClick: () => backToDocument(context),
           child: Stack(

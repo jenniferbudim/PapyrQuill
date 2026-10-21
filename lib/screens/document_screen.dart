@@ -10,6 +10,7 @@ import '../export/docx_exporter.dart';
 import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_tabs.dart';
 import '../widgets/desktop_shell.dart';
 import '../widgets/rename_dialog.dart';
 import '../widgets/unsaved_dialog.dart';
@@ -55,6 +56,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   /// The order you just dropped, shown until the database stream catches up.
   List<Chapter>? _orderOverride;
 
+  late final LeaveGuardHolder _guard;
   Future<bool> Function()? _previousLeaveGuard;
 
   /// Asks before the Windows window is closed with an unsaved title edit.
@@ -64,8 +66,9 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   void initState() {
     super.initState();
     _exitListener = AppLifecycleListener(onExitRequested: _onExitRequested);
-    _previousLeaveGuard = desktopLeaveGuard;
-    desktopLeaveGuard = _confirmLeave;
+    _guard = LeaveGuardHolder.of(context);
+    _previousLeaveGuard = _guard.check;
+    _guard.check = _confirmLeave;
     _repo = ref.read(repositoryProvider);
     _actions = ref.read(documentActionsProvider);
     // Pull the latest from the server. The database streams update the UI.
@@ -75,8 +78,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   @override
   void dispose() {
     // Hand the check back to the screen underneath, if there is one.
-    if (desktopLeaveGuard == _confirmLeave) {
-      desktopLeaveGuard = _previousLeaveGuard;
+    if (_guard.check == _confirmLeave) {
+      _guard.check = _previousLeaveGuard;
     }
     _exitListener?.dispose();
     _chapterScroll.dispose();
@@ -175,6 +178,14 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
         builder: (_) => EditorScreen(chapterId: chapter.id),
       ),
     );
+  }
+
+  /// Windows tabs: middle-click or Ctrl+click on a chapter.
+  void _openChapterInNewTab(Chapter chapter) {
+    openInNewTab(context, [
+      TabPage(DocumentScreen(storyId: _storyId), routeName: 'document'),
+      TabPage(EditorScreen(chapterId: chapter.id)),
+    ]);
   }
 
   void _openCharacters() {
@@ -316,14 +327,19 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
           return Padding(
             key: ValueKey(chapter.id),
             padding: EdgeInsets.only(bottom: compact ? 11 : 8),
-            child: _ChapterCard(
-              chapter: chapter,
-              index: index,
-              compact: compact,
-              isDragging: _draggingIndex == index,
-              onTap: () => _openChapter(chapter),
-              onRename: () => _rename(chapter),
-              onDelete: () => _confirmDelete(chapter),
+            child: MiddleClickable(
+              onMiddleClick: () => _openChapterInNewTab(chapter),
+              child: _ChapterCard(
+                chapter: chapter,
+                index: index,
+                compact: compact,
+                isDragging: _draggingIndex == index,
+                onTap: () => compact && isCtrlPressed()
+                    ? _openChapterInNewTab(chapter)
+                    : _openChapter(chapter),
+                onRename: () => _rename(chapter),
+                onDelete: () => _confirmDelete(chapter),
+              ),
             ),
           );
         },
@@ -362,10 +378,15 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
       child: Scaffold(
         backgroundColor: colorBackground,
         body: DesktopShell(
+          title: story?.title,
           sidebar: SidebarList(
             labels: [for (final s in stories) s.title],
             selectedIndex: selected,
             onTap: (i) => _switchStory(stories[i]),
+            onOpenInNewTab: (i) => openInNewTab(context, [
+              TabPage(DocumentScreen(storyId: stories[i].id),
+                  routeName: 'document'),
+            ]),
           ),
           child: Stack(
             children: [

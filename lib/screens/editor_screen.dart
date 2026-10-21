@@ -14,9 +14,11 @@ import '../repository/papyr_repository.dart';
 import '../spell/spell_check_dialog.dart';
 import '../spell/spell_checker.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_tabs.dart';
 import '../widgets/desktop_shell.dart';
 import '../widgets/rename_dialog.dart';
 import '../widgets/unsaved_dialog.dart';
+import 'document_screen.dart';
 
 /// Port of EditorScreen.kt + EditorViewModel.kt.
 ///
@@ -55,6 +57,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
 
   late final PapyrRepository _repo;
   QuillController? _controller;
+
+  /// The editor's focus, so Android can keep the cursor active after an
+  /// auto-save (see [_restoreFocusIfLost]).
+  final FocusNode _editorFocus = FocusNode(debugLabel: 'chapter editor');
   StreamSubscription<dynamic>? _changesSub;
   Timer? _saveTimer;
 
@@ -67,6 +73,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   bool get _dirty => _dirtyNotifier.value;
   set _dirty(bool value) => _dirtyNotifier.value = value;
 
+  late final LeaveGuardHolder _guard;
   Future<bool> Function()? _previousLeaveGuard;
 
   /// Asks before the Windows window is closed with unsaved changes.
@@ -78,8 +85,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _repo = ref.read(repositoryProvider);
     WidgetsBinding.instance.addObserver(this);
     _exitListener = AppLifecycleListener(onExitRequested: _onExitRequested);
-    _previousLeaveGuard = desktopLeaveGuard;
-    desktopLeaveGuard = _confirmLeave;
+    _guard = LeaveGuardHolder.of(context);
+    _previousLeaveGuard = _guard.check;
+    _guard.check = _confirmLeave;
     _load();
   }
 
@@ -87,8 +95,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     // Hand the check back to the screen underneath, if there is one.
-    if (desktopLeaveGuard == _confirmLeave) {
-      desktopLeaveGuard = _previousLeaveGuard;
+    if (_guard.check == _confirmLeave) {
+      _guard.check = _previousLeaveGuard;
     }
     _saveTimer?.cancel();
     // _save reads the document synchronously before its first await, so it is
@@ -97,6 +105,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _changesSub?.cancel();
     _exitListener?.dispose();
     _controller?.dispose();
+    _editorFocus.dispose();
     _dirtyNotifier.dispose();
     super.dispose();
   }
@@ -149,6 +158,19 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     if (applied) {
       _replaceContent(fresh.contentHtml);
     }
+    // TEMPORARY diagnostics (the Windows exe has no console): shows what the
+    // server sent and what was done with it. Remove once sync is confirmed.
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text(
+          'Sync check: server text ${fresh.contentHtml.length} chars, '
+          'local copy ${local.contentHtml.length} chars, '
+          '${typed ? "you had typed already" : applied ? "server text applied" : "nothing to change"}. '
+          'Editor now has ${_controller?.document.toPlainText().trim().length ?? 0} letters.',
+        ),
+      ));
     setState(() {});
   }
 
@@ -184,14 +206,32 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     final chapter = _chapter;
     if (controller == null || chapter == null || !_dirty) return;
 
+    final hadFocus = _editorFocus.hasFocus;
     final html = documentToHtml(controller.document);
     _dirty = false;
+    _restoreFocusIfLost(hadFocus);
     if (html == _lastSavedHtml) return;
 
     _lastSavedHtml = html;
     final updated = chapter.copyWith(contentHtml: html);
     _chapter = updated;
     await _repo.updateChapter(updated);
+    _restoreFocusIfLost(hadFocus);
+  }
+
+  /// Android: after an auto-save the text cursor used to go inactive, so you
+  /// had to tap the text again. If the editor had focus when the save started
+  /// and lost it by itself, give it back. (Windows is left as it is.)
+  void _restoreFocusIfLost(bool hadFocus) {
+    if (!hadFocus || defaultTargetPlatform != TargetPlatform.android) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _editorFocus.hasFocus) return;
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        return;
+      }
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      _editorFocus.requestFocus();
+    });
   }
 
   // ── Leaving with unsaved changes ──────────────────────────────────────────
@@ -445,6 +485,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                     ),
                     child: QuillEditor.basic(
                       controller: controller,
+                      focusNode: _editorFocus,
                       config: const QuillEditorConfig(
                         placeholder: 'Start writing your story…',
                         expands: true,
@@ -496,10 +537,16 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
       child: Scaffold(
         backgroundColor: colorBackground,
         body: DesktopShell(
+          title: _chapter?.title,
           sidebar: SidebarList(
             labels: [for (final c in chapters) c.title],
             selectedIndex: selected,
             onTap: (i) => unawaited(_switchChapter(chapters[i])),
+            onOpenInNewTab: (i) => openInNewTab(context, [
+              TabPage(DocumentScreen(storyId: chapters[i].storyId),
+                  routeName: 'document'),
+              TabPage(EditorScreen(chapterId: chapters[i].id)),
+            ]),
           ),
           child: controller == null
               ? const Center(child: CircularProgressIndicator())

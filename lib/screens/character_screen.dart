@@ -8,6 +8,7 @@ import '../providers.dart';
 import '../repository/papyr_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/book_top_header.dart';
+import '../widgets/character_links.dart';
 import '../widgets/desktop_book.dart';
 import '../widgets/desktop_shell.dart';
 import 'character_actions.dart';
@@ -49,6 +50,26 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
 
   late int _selectedGroupId;
 
+  /// The character just opened through a link: its card expands and scrolls
+  /// into view.
+  int? _highlightId;
+  Timer? _highlightTimer;
+
+  /// Scroll position of the phone's card list (see [_openLinked]).
+  final ScrollController _listScroll = ScrollController();
+
+  /// The filter box: only characters containing every typed word are shown.
+  final TextEditingController _filterController = TextEditingController();
+  String _filter = '';
+
+  @override
+  void dispose() {
+    _highlightTimer?.cancel();
+    _listScroll.dispose();
+    _filterController.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -60,12 +81,88 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
+  // ── Links between characters ──────────────────────────────────────────────
+
+  List<StoryCharacter> get _allCharacters =>
+      ref.read(allCharactersProvider(_storyId)).valueOrNull ??
+      const <StoryCharacter>[];
+
+  /// Everyone a character can link to (not itself), with their group's name.
+  List<LinkTarget> _linkTargets({int? excludeId}) {
+    final groups = ref.read(groupsProvider(_storyId)).valueOrNull ??
+        const <CharacterGroup>[];
+    final groupName = {for (final g in groups) g.id: g.name};
+    return [
+      for (final c in _allCharacters)
+        if (c.id != excludeId)
+          LinkTarget(c.name, groupName[c.groupId] ?? ''),
+    ];
+  }
+
+  /// A link was tapped: show that character in its own group.
+  void _openLinked(StoryCharacter target) {
+    _highlightTimer?.cancel();
+    _filterController.clear();
+    setState(() {
+      _filter = '';
+      _selectedGroupId = target.groupId;
+      _highlightId = target.id;
+    });
+    _highlightTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _highlightId = null);
+    });
+    // The phone's list builds cards lazily, so move roughly to the card first;
+    // the card then scrolls itself exactly into view.
+    Future<void>.delayed(const Duration(milliseconds: 120), () {
+      if (!mounted || !_listScroll.hasClients) return;
+      final list = ref.read(charactersProvider(_groupId)).valueOrNull;
+      final i = list?.indexWhere((c) => c.id == target.id) ?? -1;
+      if (i <= 0) return;
+      final max = _listScroll.position.maxScrollExtent;
+      _listScroll.jumpTo((i * 62.0).clamp(0.0, max));
+    });
+  }
+
+  /// After a rename, points the links that used the old name at the new one.
+  Future<void> _renameLinks(int renamedId, String oldName, String newName) async {
+    for (final c in _allCharacters) {
+      if (c.id == renamedId) continue;
+      final description = renameLinkInText(c.description, oldName, newName);
+      final attributes = {
+        for (final e in c.attributes.entries)
+          e.key: renameLinkInText(e.value, oldName, newName),
+      };
+      var changed = description != c.description;
+      for (final e in attributes.entries) {
+        if (e.value != c.attributes[e.key]) changed = true;
+      }
+      if (changed) {
+        await _actions.updateCharacter(
+          c.copyWith(description: description, attributes: attributes),
+        );
+      }
+    }
+  }
+
+  Widget _card(StoryCharacter character, CharacterIndex index) {
+    return _CharacterCard(
+      key: ValueKey(character.id),
+      character: character,
+      index: index,
+      backlinks: backlinksTo(character, _allCharacters),
+      highlight: character.id == _highlightId,
+      onOpenLink: _openLinked,
+      onEdit: () => _editCharacter(character),
+    );
+  }
+
   Future<void> _addCharacter() async {
     final result = await showDialog<CharacterFormResult>(
       context: context,
-      builder: (_) => const CharacterEditDialog(
+      builder: (_) => CharacterEditDialog(
         title: 'New Item',
         confirmText: 'Add',
+        linkTargets: _linkTargets(),
       ),
     );
     if (result == null) return;
@@ -86,6 +183,7 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
         confirmText: 'Save',
         initial: character,
         canDelete: true,
+        linkTargets: _linkTargets(excludeId: character.id),
       ),
     );
     if (result == null) return;
@@ -100,6 +198,10 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
         attributes: result.attributes,
       ),
     );
+    // Keep links from other characters working if the name changed.
+    if (result.name.trim() != character.name.trim()) {
+      await _renameLinks(character.id, character.name, result.name);
+    }
   }
 
   Future<void> _confirmDeleteCharacter(StoryCharacter character) async {
@@ -188,6 +290,92 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
     );
   }
 
+  // ── Filter ────────────────────────────────────────────────────────────────
+
+  /// Keeps the characters whose name, description or attributes (trait names
+  /// and values) contain every word typed in the filter box, ignoring case.
+  List<StoryCharacter> _applyFilter(List<StoryCharacter> all) {
+    final words = _filter
+        .toLowerCase()
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .toList();
+    if (words.isEmpty) return all;
+    return [
+      for (final c in all)
+        if (_matchesAll(c, words)) c,
+    ];
+  }
+
+  bool _matchesAll(StoryCharacter c, List<String> words) {
+    final text = StringBuffer()
+      ..write(c.name)
+      ..write('\n')
+      ..write(c.description);
+    for (final e in c.attributes.entries) {
+      text
+        ..write('\n')
+        ..write(e.key)
+        ..write('\n')
+        ..write(e.value);
+    }
+    final haystack = text.toString().toLowerCase();
+    return words.every(haystack.contains);
+  }
+
+  Widget _filterField({double? width}) {
+    final field = TextField(
+      controller: _filterController,
+      cursorColor: darkPink,
+      style: const TextStyle(color: cardTitleColor, fontSize: 14),
+      textInputAction: TextInputAction.search,
+      onChanged: (v) => setState(() => _filter = v),
+      decoration: InputDecoration(
+        hintText: 'Filter characters',
+        hintStyle: TextStyle(color: darkPink.withValues(alpha: 0.5)),
+        isDense: true,
+        filled: true,
+        fillColor: lightPink,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        prefixIcon: const Icon(Icons.search, color: darkPink, size: 20),
+        prefixIconConstraints: const BoxConstraints(minWidth: 38),
+        suffixIcon: _filter.isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Clear filter',
+                icon: const Icon(Icons.close, color: darkPink, size: 18),
+                onPressed: () {
+                  _filterController.clear();
+                  setState(() => _filter = '');
+                },
+              ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(24),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+    return width == null ? field : SizedBox(width: width, child: field);
+  }
+
+  Widget _buildNoMatches() {
+    return Align(
+      alignment: Alignment.topCenter,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 48),
+        child: Text(
+          'No characters match "$_filter"',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: darkPink.withValues(alpha: 0.55),
+            fontSize: 14,
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Windows layout ───────────────────────────────────────────────────────
 
   Widget _buildDesktop(
@@ -195,9 +383,17 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
     List<StoryCharacter> characters,
     CharacterGroup? selectedGroup,
   ) {
+    final shown = _applyFilter(characters);
+    final index = CharacterIndex(
+      ref.watch(allCharactersProvider(_storyId)).valueOrNull ??
+          const <StoryCharacter>[],
+    );
     return Scaffold(
       backgroundColor: colorBackground,
       body: DesktopShell(
+        title: selectedGroup?.name ??
+            ref.watch(storyProvider(_storyId)).valueOrNull?.title ??
+            'Characters',
         child: DesktopBook(
           onBookmarkClick: () => backToDocument(context),
           child: Stack(
@@ -235,6 +431,8 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
                               ),
                             ),
                           ),
+                          const Spacer(),
+                          _filterField(width: 240),
                           if (selectedGroup != null)
                             PopupMenuButton<String>(
                               tooltip: 'Group options',
@@ -256,8 +454,10 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
                       ),
                     ),
                     Expanded(
-                      child: characters.isEmpty
-                          ? _buildEmpty()
+                      child: shown.isEmpty
+                          ? (characters.isEmpty
+                              ? _buildEmpty()
+                              : _buildNoMatches())
                           : SingleChildScrollView(
                               padding:
                                   const EdgeInsets.fromLTRB(60, 0, 60, 120),
@@ -266,15 +466,10 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
                                 runSpacing: 12,
                                 crossAxisAlignment: WrapCrossAlignment.start,
                                 children: [
-                                  for (final character in characters)
+                                  for (final character in shown)
                                     SizedBox(
                                       width: 340,
-                                      child: _CharacterCard(
-                                        key: ValueKey(character.id),
-                                        character: character,
-                                        onEdit: () =>
-                                            _editCharacter(character),
-                                      ),
+                                      child: _card(character, index),
                                     ),
                                 ],
                               ),
@@ -340,6 +535,12 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
     if (useDesktopLayout(context)) {
       return _buildDesktop(groups, characters, selectedGroup);
     }
+
+    final shown = _applyFilter(characters);
+    final index = CharacterIndex(
+      ref.watch(allCharactersProvider(_storyId)).valueOrNull ??
+          const <StoryCharacter>[],
+    );
 
     final width = MediaQuery.sizeOf(context).width;
     final sidePadding =
@@ -413,22 +614,24 @@ class _CharacterScreenState extends ConsumerState<CharacterScreen> {
                 ),
               ),
 
+              // Filter by name, description or attributes.
+              Padding(
+                padding: EdgeInsets.fromLTRB(sidePadding, 0, sidePadding, 10),
+                child: _filterField(),
+              ),
+
               // Character cards.
               Expanded(
-                child: characters.isEmpty
-                    ? _buildEmpty()
+                child: shown.isEmpty
+                    ? (characters.isEmpty ? _buildEmpty() : _buildNoMatches())
                     : ListView.separated(
+                        controller: _listScroll,
                         padding:
                             EdgeInsets.fromLTRB(sidePadding, 0, sidePadding, 120),
-                        itemCount: characters.length,
+                        itemCount: shown.length,
                         separatorBuilder: (_, __) => const SizedBox(height: 10),
                         itemBuilder: (context, i) {
-                          final character = characters[i];
-                          return _CharacterCard(
-                            key: ValueKey(character.id),
-                            character: character,
-                            onEdit: () => _editCharacter(character),
-                          );
+                          return _card(shown[i], index);
                         },
                       ),
               ),
@@ -549,17 +752,58 @@ class _CharacterCard extends StatefulWidget {
     super.key,
     required this.character,
     required this.onEdit,
+    required this.index,
+    required this.onOpenLink,
+    this.backlinks = const [],
+    this.highlight = false,
   });
 
   final StoryCharacter character;
   final VoidCallback onEdit;
+
+  /// Resolves `[[Name]]` links in the text.
+  final CharacterIndex index;
+  final ValueChanged<StoryCharacter> onOpenLink;
+
+  /// Characters whose text links to this one.
+  final List<StoryCharacter> backlinks;
+
+  /// True while this card was just opened through a link: it expands and
+  /// scrolls into view.
+  final bool highlight;
 
   @override
   State<_CharacterCard> createState() => _CharacterCardState();
 }
 
 class _CharacterCardState extends State<_CharacterCard> {
-  bool _expanded = false;
+  late bool _expanded = widget.highlight;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.highlight) _scrollIntoView();
+  }
+
+  @override
+  void didUpdateWidget(_CharacterCard old) {
+    super.didUpdateWidget(old);
+    if (widget.highlight && !old.highlight) {
+      setState(() => _expanded = true);
+      _scrollIntoView();
+    }
+  }
+
+  void _scrollIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: const Duration(milliseconds: 250),
+        alignment: 0.1,
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -622,8 +866,10 @@ class _CharacterCardState extends State<_CharacterCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (character.description.trim().isNotEmpty) ...[
-            Text(
+            LinkedText(
               character.description,
+              index: widget.index,
+              onOpen: widget.onOpenLink,
               style: const TextStyle(fontSize: 14, height: 20 / 14, color: darkPink),
             ),
             const SizedBox(height: 8),
@@ -633,19 +879,37 @@ class _CharacterCardState extends State<_CharacterCard> {
           for (final entry in character.attributes.entries)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Text.rich(
-                TextSpan(
-                  style: const TextStyle(fontSize: 13, color: darkPink),
-                  children: [
-                    TextSpan(
-                      text: '${entry.key}: ',
-                      style: const TextStyle(fontWeight: FontWeight.w500),
-                    ),
-                    TextSpan(text: entry.value),
-                  ],
-                ),
+              child: LinkedText(
+                entry.value,
+                index: widget.index,
+                onOpen: widget.onOpenLink,
+                style: const TextStyle(fontSize: 13, color: darkPink),
+                leading: [
+                  TextSpan(
+                    text: '${entry.key}: ',
+                    style: const TextStyle(fontWeight: FontWeight.w500),
+                  ),
+                ],
               ),
             ),
+          if (widget.backlinks.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            LinkedText(
+              widget.backlinks.map((c) => linkToken(c.name)).join(', '),
+              index: widget.index,
+              onOpen: widget.onOpenLink,
+              style: TextStyle(
+                fontSize: 12,
+                color: darkPink.withValues(alpha: 0.75),
+              ),
+              leading: const [
+                TextSpan(
+                  text: 'Linked from: ',
+                  style: TextStyle(fontWeight: FontWeight.w500),
+                ),
+              ],
+            ),
+          ],
           // Long-press is awkward with a mouse, so there is also a button.
           Align(
             alignment: Alignment.centerRight,
@@ -704,12 +968,16 @@ class CharacterEditDialog extends StatefulWidget {
     required this.confirmText,
     this.initial,
     this.canDelete = false,
+    this.linkTargets = const [],
   });
 
   final String title;
   final String confirmText;
   final StoryCharacter? initial;
   final bool canDelete;
+
+  /// Characters the text can link to. Empty hides the link buttons.
+  final List<LinkTarget> linkTargets;
 
   @override
   State<CharacterEditDialog> createState() => _CharacterEditDialogState();
@@ -742,6 +1010,34 @@ class _CharacterEditDialogState extends State<CharacterEditDialog> {
       row.dispose();
     }
     super.dispose();
+  }
+
+  /// A small "link" button inside a text field.
+  Widget? _linkButton(TextEditingController controller) {
+    if (widget.linkTargets.isEmpty) return null;
+    return IconButton(
+      tooltip: 'Link to a character',
+      iconSize: 18,
+      padding: const EdgeInsets.all(6),
+      constraints: const BoxConstraints(),
+      icon: const Icon(Icons.link, color: darkPink),
+      onPressed: () => _insertLink(controller),
+    );
+  }
+
+  /// Inserts `[[Name]]` where the cursor is in [controller].
+  Future<void> _insertLink(TextEditingController controller) async {
+    final name = await pickCharacterToLink(context, widget.linkTargets);
+    if (name == null || !mounted) return;
+    final text = controller.text;
+    final sel = controller.selection;
+    final start = sel.isValid ? sel.start : text.length;
+    final end = sel.isValid ? sel.end : text.length;
+    final token = linkToken(name);
+    controller.value = TextEditingValue(
+      text: text.replaceRange(start, end, token),
+      selection: TextSelection.collapsed(offset: start + token.length),
+    );
   }
 
   void _save() {
@@ -810,7 +1106,12 @@ class _CharacterEditDialogState extends State<CharacterEditDialog> {
               maxLines: 8,
               cursorColor: darkPink,
               style: textStyle,
-              decoration: fieldDecoration('Description'),
+              decoration: fieldDecoration('Description').copyWith(
+                suffixIcon: _linkButton(_description),
+                helperText: widget.linkTargets.isEmpty
+                    ? null
+                    : 'Use the link button to mention another character.',
+              ),
             ),
             const SizedBox(height: 10),
             const Text(
@@ -822,31 +1123,60 @@ class _CharacterEditDialogState extends State<CharacterEditDialog> {
               ),
             ),
             const SizedBox(height: 10),
-            for (final row in _rows)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: row.key,
-                        cursorColor: darkPink,
-                        style: textStyle,
-                        decoration: fieldDecoration('Trait'),
-                      ),
+            // Drag the handle on the left to change the order of the
+            // attributes; the card and the server keep that order.
+            ReorderableListView(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              buildDefaultDragHandles: false,
+              onReorder: (oldIndex, newIndex) {
+                setState(() {
+                  if (newIndex > oldIndex) newIndex -= 1;
+                  _rows.insert(newIndex, _rows.removeAt(oldIndex));
+                });
+              },
+              children: [
+                for (var i = 0; i < _rows.length; i++)
+                  Padding(
+                    key: ObjectKey(_rows[i]),
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Row(
+                      children: [
+                        ReorderableDragStartListener(
+                          index: i,
+                          child: const MouseRegion(
+                            cursor: SystemMouseCursors.grab,
+                            child: Padding(
+                              padding: EdgeInsets.only(right: 6),
+                              child: Icon(Icons.drag_handle,
+                                  size: 22, color: darkPink),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: TextField(
+                            controller: _rows[i].key,
+                            cursorColor: darkPink,
+                            style: textStyle,
+                            decoration: fieldDecoration('Trait'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: _rows[i].value,
+                            cursorColor: darkPink,
+                            style: textStyle,
+                            decoration: fieldDecoration('Value').copyWith(
+                              suffixIcon: _linkButton(_rows[i].value),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: TextField(
-                        controller: row.value,
-                        cursorColor: darkPink,
-                        style: textStyle,
-                        decoration: fieldDecoration('Value'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+                  ),
+              ],
+            ),
             Align(
               alignment: Alignment.centerRight,
               child: Tooltip(

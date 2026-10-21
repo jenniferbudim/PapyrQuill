@@ -4,6 +4,7 @@ import 'data/app_database.dart';
 import 'network/api_config.dart';
 import 'network/remote_data_source.dart';
 import 'network/sync_manager.dart';
+import 'network/xampp_launcher.dart';
 import 'repository/papyr_repository.dart';
 import 'screens/character_actions.dart';
 import 'screens/document_actions.dart';
@@ -40,9 +41,12 @@ final repositoryProvider = Provider<PapyrRepository>(
 
 /// Runs once when the home screen first appears: sends rows created while
 /// offline, then pulls the story list. (Kotlin: HomeViewModel's init block.)
-final startupSyncProvider = FutureProvider<void>(
-  (ref) => ref.read(repositoryProvider).refreshStories(),
-);
+final startupSyncProvider = FutureProvider<void>((ref) async {
+  // Windows: make sure XAMPP's Apache and MySQL are running first (no-op on
+  // Android, or when the server address is not this PC).
+  await XamppLauncher.startIfNeeded(ref.read(apiConfigProvider).baseUrl);
+  await ref.read(repositoryProvider).refreshStories();
+});
 
 /// Replaces HomeViewModel's story list Flow.
 final storiesProvider = StreamProvider<List<Story>>(
@@ -69,6 +73,11 @@ final groupsProvider = StreamProvider.family<List<CharacterGroup>, int>(
 
 final charactersProvider = StreamProvider.family<List<StoryCharacter>, int>(
   (ref, groupId) => ref.watch(repositoryProvider).getCharactersForGroup(groupId),
+);
+
+/// All characters of a story (every group), for links between characters.
+final allCharactersProvider = StreamProvider.family<List<StoryCharacter>, int>(
+  (ref, storyId) => ref.watch(repositoryProvider).getCharactersForStory(storyId),
 );
 
 final characterActionsProvider = Provider<CharacterActions>(

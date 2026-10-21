@@ -190,6 +190,13 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.name)]))
           .watch();
 
+  /// Every character of a story, across all its groups (used for links).
+  Stream<List<StoryCharacter>> watchCharactersForStory(int storyId) =>
+      (select(storyCharacters)
+            ..where((t) => t.storyId.equals(storyId))
+            ..orderBy([(t) => OrderingTerm.asc(t.name)]))
+          .watch();
+
   Future<List<StoryCharacter>> getCharactersForGroup(int groupId) =>
       (select(storyCharacters)
             ..where((t) => t.groupId.equals(groupId))
