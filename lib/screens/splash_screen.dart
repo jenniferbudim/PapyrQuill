@@ -60,7 +60,10 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
             // windows where half the width would be huge.
             widthFactor: 0.5,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 360),
+              constraints: BoxConstraints(
+                // Smaller on Windows, where the window is much wider.
+                maxWidth: isDesktopPlatform() ? 220 : 360,
+              ),
               child: Image.asset(
                 'assets/images/logo.png',
                 semanticLabel: 'Papyr Quill Logo',

@@ -38,12 +38,17 @@ class DesktopShell extends StatelessWidget {
     required this.child,
     this.sidebar,
     this.title,
+    this.logoGoesTo,
   });
 
   final Widget child;
 
   /// Shown on this screen's tab.
   final String? title;
+
+  /// Route name the logo returns to instead of Home (the editor uses
+  /// 'document' so the logo goes back to the chapter list).
+  final String? logoGoesTo;
 
   /// Shown under the logo (for example the list of stories).
   final Widget? sidebar;
@@ -62,7 +67,7 @@ class DesktopShell extends StatelessWidget {
                 const SizedBox(height: 30),
                 // Clicking the logo goes back to the Home screen.
                 Tooltip(
-                  message: 'Home',
+                  message: logoGoesTo == null ? 'Home' : 'Back to chapters',
                   child: InkWell(
                     canRequestFocus: false,
                     onTap: () async {
@@ -70,7 +75,12 @@ class DesktopShell extends StatelessWidget {
                       // changes first.
                       final ok = await LeaveGuardHolder.of(context).check?.call() ?? true;
                       if (!ok || !context.mounted) return;
-                      Navigator.of(context).popUntil((route) => route.isFirst);
+                      Navigator.of(context).popUntil(
+                        (route) =>
+                            route.isFirst ||
+                            (logoGoesTo != null &&
+                                route.settings.name == logoGoesTo),
+                      );
                     },
                     child: Image.asset(
                       'assets/images/logo.png',

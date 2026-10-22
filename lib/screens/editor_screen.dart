@@ -539,6 +539,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
         backgroundColor: colorBackground,
         body: DesktopShell(
           title: _chapter?.title,
+          logoGoesTo: 'document',
           sidebar: SidebarList(
             labels: [for (final c in chapters) c.title],
             selectedIndex: selected,
