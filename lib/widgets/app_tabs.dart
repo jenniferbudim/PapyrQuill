@@ -1,20 +1,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:window_manager/window_manager.dart';
 
 import '../theme/app_theme.dart';
-
-/// Inactive tabs.
-const Color _inactiveTab = Color(0xFFF6C5E1);
-
-/// The window has no title bar on Windows (see main.dart), so the tab strip
-/// carries the minimize / maximize / close buttons and can be dragged.
-bool get _customWindowFrame => defaultTargetPlatform == TargetPlatform.windows;
 
 // Browser-style tabs for the Windows (desktop) app.
 //
@@ -359,9 +350,7 @@ class _TabStrip extends StatelessWidget {
           height: 37,
           child: LayoutBuilder(
             builder: (context, box) {
-              final reserved =
-                  _plusWidth + (_customWindowFrame ? 3 * 46.0 + 40 : 0);
-              final width = ((box.maxWidth - reserved) / tabs.length)
+              final width = ((box.maxWidth - _plusWidth) / tabs.length)
                   .clamp(110.0, 220.0)
                   .toDouble();
               return Row(
@@ -399,13 +388,6 @@ class _TabStrip extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (_customWindowFrame) ...[
-                    // Empty space: drag the window, double-click to maximize.
-                    const Expanded(
-                      child: DragToMoveArea(child: SizedBox.expand()),
-                    ),
-                    const _WindowButtons(),
-                  ],
                 ],
               );
             },
@@ -475,7 +457,7 @@ class _TabButton extends StatelessWidget {
                   child: InkWell(
                     canRequestFocus: false,
                     onTap: onClose,
-                    child: const Padding(
+                    child: Padding(
                       padding: EdgeInsets.all(7),
                       child: Icon(
                         Icons.close,
@@ -490,76 +472,6 @@ class _TabButton extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Minimize, maximize / restore and close for the title-bar-less window.
-class _WindowButtons extends StatefulWidget {
-  const _WindowButtons();
-
-  @override
-  State<_WindowButtons> createState() => _WindowButtonsState();
-}
-
-class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
-  bool _maximized = false;
-
-  @override
-  void initState() {
-    super.initState();
-    windowManager.addListener(this);
-    unawaited(windowManager.isMaximized().then((v) {
-      if (mounted) setState(() => _maximized = v);
-    }));
-  }
-
-  @override
-  void dispose() {
-    windowManager.removeListener(this);
-    super.dispose();
-  }
-
-  @override
-  void onWindowMaximize() => setState(() => _maximized = true);
-
-  @override
-  void onWindowUnmaximize() => setState(() => _maximized = false);
-
-  Widget _button(IconData icon, String tip, VoidCallback onTap,
-      {Color? hover}) {
-    return Tooltip(
-      message: tip,
-      child: InkWell(
-        canRequestFocus: false,
-        hoverColor: hover,
-        onTap: onTap,
-        child: SizedBox(
-          width: 46,
-          height: 37,
-          child: Icon(icon, size: 16, color: cardTitleColor),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        _button(Icons.minimize, 'Minimize', () => windowManager.minimize()),
-        _button(
-          _maximized ? Icons.filter_none : Icons.crop_square,
-          _maximized ? 'Restore' : 'Maximize',
-          () => _maximized
-              ? windowManager.unmaximize()
-              : windowManager.maximize(),
-        ),
-        // Closing goes through the normal exit request, so unsaved changes are
-        // still asked about.
-        _button(Icons.close, 'Close', () => windowManager.close(),
-            hover: Colors.red.withValues(alpha: 0.5)),
-      ],
     );
   }
 }
