@@ -118,6 +118,20 @@ class PapyrRepository {
     await _sync.pullAllStories();
   }
 
+  /// Like [refreshStories], but says how it went: true when the server answered
+  /// and nothing is left waiting to be sent, false for "offline mode".
+  Future<bool> syncNow() async {
+    await syncPending();
+    final reached = await _sync.pullAllStories();
+    if (!reached) return false;
+    final waiting = (await _db.getPendingStories()).length +
+        (await _db.getPendingFrames()).length +
+        (await _db.getPendingGroups()).length +
+        (await _db.getPendingChapters()).length +
+        (await _db.getPendingCharacters()).length;
+    return waiting == 0;
+  }
+
   // ── Chapters ─────────────────────────────────────────────────────────────
   Stream<List<Chapter>> getChaptersForStory(int storyId) =>
       _db.watchChaptersForStory(resolveStoryId(storyId));

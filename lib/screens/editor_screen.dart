@@ -62,6 +62,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   /// The editor's focus, so Android can keep the cursor active after an
   /// auto-save (see [_restoreFocusIfLost]).
   final FocusNode _editorFocus = FocusNode(debugLabel: 'chapter editor');
+
+  /// The editor's scroll position, so a big paste does not make the page jump.
+  final ScrollController _editorScroll = ScrollController();
+
+  /// Windows: keeps the cursor in the editor (see [_keepCursorInEditor]).
+  Timer? _focusKeeper;
   StreamSubscription<dynamic>? _changesSub;
   Timer? _saveTimer;
 
@@ -86,6 +92,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _repo = ref.read(repositoryProvider);
     WidgetsBinding.instance.addObserver(this);
     _exitListener = AppLifecycleListener(onExitRequested: _onExitRequested);
+    if (isDesktopPlatform()) {
+      _focusKeeper = Timer.periodic(
+        const Duration(milliseconds: 250),
+        (_) => _keepCursorInEditor(),
+      );
+    }
     _guard = LeaveGuardHolder.of(context);
     _previousLeaveGuard = _guard.check;
     _guard.check = _confirmLeave;
@@ -106,7 +118,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _changesSub?.cancel();
     _exitListener?.dispose();
     _controller?.dispose();
+    _focusKeeper?.cancel();
     _editorFocus.dispose();
+    _editorScroll.dispose();
     _dirtyNotifier.dispose();
     super.dispose();
   }
@@ -177,11 +191,56 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
 
   void _listenToChanges() {
     _changesSub?.cancel();
-    _changesSub = _controller?.document.changes.listen((_) {
+    _changesSub = _controller?.document.changes.listen((change) {
+      if (isDesktopPlatform()) _keepScrollOnPaste(change.change, change.source);
       _dirty = true;
       _saveTimer?.cancel();
       _saveTimer = Timer(_autoSaveDelay, () => unawaited(_save()));
     });
+  }
+
+  /// Windows: pasting a lot of text used to scroll the page so the end of the
+  /// pasted text sat at the bottom of the window. Put the scroll position back
+  /// where it was, so the text you were looking at stays where it is.
+  void _keepScrollOnPaste(dynamic delta, ChangeSource source) {
+    if (source != ChangeSource.local) return;
+    var inserted = 0;
+    for (final dynamic op in delta.toList() as List) {
+      final Object? data = op.data;
+      if (op.isInsert == true && data is String) inserted += data.length;
+    }
+    if (inserted < 40 || !_editorScroll.hasClients) return;
+    final offset = _editorScroll.offset;
+    void restore() {
+      if (!mounted || !_editorScroll.hasClients) return;
+      final target = offset.clamp(
+        _editorScroll.position.minScrollExtent,
+        _editorScroll.position.maxScrollExtent,
+      ).toDouble();
+      if ((_editorScroll.offset - target).abs() > 0.5) {
+        _editorScroll.jumpTo(target);
+      }
+    }
+
+    // The editor scrolls to the caret a frame or two after the paste.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      restore();
+      WidgetsBinding.instance.addPostFrameCallback((_) => restore());
+    });
+  }
+
+  /// Windows: the cursor must always be in the editor. If the editor lost
+  /// focus and nothing else (a dialog, another text box) took it, take it back.
+  void _keepCursorInEditor() {
+    if (!mounted || _controller == null) return;
+    if (_editorFocus.hasFocus || !_editorFocus.canRequestFocus) return;
+    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
+    if (ModalRoute.of(context)?.isCurrent != true) return;
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary != null && primary is! FocusScopeNode) return;
+    _editorFocus.requestFocus();
   }
 
   void _replaceContent(String html) {
@@ -565,6 +624,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                         ),
                         child: QuillEditor.basic(
                           controller: controller,
+                          focusNode: _editorFocus,
+                          scrollController: _editorScroll,
                           config: const QuillEditorConfig(
                             placeholder: 'Start writing your story…',
                             expands: true,
@@ -579,6 +640,16 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
         ),
       ),
     );
+  }
+
+  /// "123 words" for the text in the editor.
+  String _wordCountLabel(QuillController c) {
+    final words = c.document
+        .toPlainText()
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .length;
+    return '$words ${words == 1 ? 'word' : 'words'}';
   }
 
   Widget _buildToolbar(QuillController c, {bool desktop = false}) {
@@ -669,6 +740,17 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                     onPressed: _manualSave,
                   ),
                   if (desktop) ...[
+                    // Word count, updated as you type.
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      child: Text(
+                        _wordCountLabel(c),
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: darkPink,
+                        ),
+                      ),
+                    ),
                     const Spacer(),
                     _ToolbarButton(
                       icon: Icons.undo,

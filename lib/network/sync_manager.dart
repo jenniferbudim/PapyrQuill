@@ -48,13 +48,15 @@ class SyncManager {
 
   // ── Pull: server -> local database ───────────────────────────────────────
 
-  Future<void> pullAllStories() async {
+  /// Returns false when the server could not be reached or answered badly.
+  Future<bool> pullAllStories() async {
     final list = await _remote.getAllStories();
-    if (list == null) return;
+    if (list == null) return false;
     for (final dto in list) {
       await _db.insertStory(_toStory(dto));
     }
     _log('Pulled ${list.length} stories');
+    return true;
   }
 
   /// Call when opening the document, timeline or character screens.

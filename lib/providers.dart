@@ -41,11 +41,38 @@ final repositoryProvider = Provider<PapyrRepository>(
 
 /// Runs once when the home screen first appears: sends rows created while
 /// offline, then pulls the story list. (Kotlin: HomeViewModel's init block.)
+/// How the last sync went, shown on the Home screen.
+enum SyncStatus { unknown, syncing, success, offline }
+
+final syncStatusProvider = StateProvider<SyncStatus>((_) => SyncStatus.unknown);
+
+/// Syncs and updates [syncStatusProvider]: success, or offline mode when the
+/// server cannot be reached or rows are still waiting to be sent.
+Future<bool> runSyncNow(WidgetRef ref) async {
+  ref.read(syncStatusProvider.notifier).state = SyncStatus.syncing;
+  bool ok;
+  try {
+    ok = await ref.read(repositoryProvider).syncNow();
+  } catch (_) {
+    ok = false;
+  }
+  ref.read(syncStatusProvider.notifier).state =
+      ok ? SyncStatus.success : SyncStatus.offline;
+  return ok;
+}
+
 final startupSyncProvider = FutureProvider<void>((ref) async {
   // Windows: make sure XAMPP's Apache and MySQL are running first (no-op on
   // Android, or when the server address is not this PC).
   await XamppLauncher.startIfNeeded(ref.read(apiConfigProvider).baseUrl);
-  await ref.read(repositoryProvider).refreshStories();
+  bool ok;
+  try {
+    ok = await ref.read(repositoryProvider).syncNow();
+  } catch (_) {
+    ok = false;
+  }
+  ref.read(syncStatusProvider.notifier).state =
+      ok ? SyncStatus.success : SyncStatus.offline;
 });
 
 /// Replaces HomeViewModel's story list Flow.

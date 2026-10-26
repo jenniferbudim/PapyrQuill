@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -282,11 +284,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ),
         const SizedBox(width: 6),
+        // Just "Success" or "Offline mode".
+        Builder(builder: (context) {
+          final status = ref.watch(syncStatusProvider);
+          final text = switch (status) {
+            SyncStatus.success => 'Success',
+            SyncStatus.offline => 'Offline mode',
+            SyncStatus.syncing => 'Syncing…',
+            SyncStatus.unknown => '',
+          };
+          return Text(
+            text,
+            style: TextStyle(
+              fontSize: 13,
+              color: status == SyncStatus.offline
+                  ? Colors.red.shade700
+                  : darkPink,
+            ),
+          );
+        }),
         IconButton(
           tooltip: 'Sync now',
           icon: const Icon(Icons.sync, color: darkPink),
-          onPressed: () =>
-              ref.read(repositoryProvider).refreshStories(),
+          onPressed: () => unawaited(runSyncNow(ref)),
         ),
         IconButton(
           tooltip: 'Server settings',
@@ -428,7 +448,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             Expanded(
               child: RefreshIndicator(
-                onRefresh: repo.refreshStories,
+                onRefresh: () async {
+                  final ok = await runSyncNow(ref);
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(SnackBar(
+                      content: Text(ok ? 'Success' : 'Offline mode'),
+                      duration: const Duration(seconds: 2),
+                    ));
+                },
                 child: stories.when(
                   loading: () =>
                       const Center(child: CircularProgressIndicator()),
