@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform, ValueNotifier;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart';
@@ -68,6 +69,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
 
   /// Windows: keeps the cursor in the editor (see [_keepCursorInEditor]).
   Timer? _focusKeeper;
+
+  // Windows: scrolling while you drag-select with the mouse.
+  final GlobalKey _editorBoxKey = GlobalKey();
+  PointerMoveEvent? _dragEvent;
+  Timer? _dragScroller;
+  bool _nudgeFlip = false;
   StreamSubscription<dynamic>? _changesSub;
   Timer? _saveTimer;
 
@@ -119,6 +126,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _exitListener?.dispose();
     _controller?.dispose();
     _focusKeeper?.cancel();
+    _dragScroller?.cancel();
     _editorFocus.dispose();
     _editorScroll.dispose();
     _dirtyNotifier.dispose();
@@ -227,6 +235,66 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
       restore();
       WidgetsBinding.instance.addPostFrameCallback((_) => restore());
     });
+  }
+
+  // ── Drag-selecting with the mouse ─────────────────────────────────────────
+
+  static const double _dragEdge = 30;
+
+  void _onEditorPointerMove(PointerMoveEvent event) {
+    if (event.kind != PointerDeviceKind.mouse ||
+        event.buttons != kPrimaryButton) {
+      return;
+    }
+    _dragEvent = event;
+    _dragScroller ??=
+        Timer.periodic(const Duration(milliseconds: 16), (_) => _dragScrollTick());
+  }
+
+  void _stopDragScroll() {
+    _dragScroller?.cancel();
+    _dragScroller = null;
+    _dragEvent = null;
+  }
+
+  /// While the mouse button is held near (or beyond) the top or bottom edge of
+  /// the editor, scroll the text and keep extending the selection.
+  void _dragScrollTick() {
+    final event = _dragEvent;
+    final box = _editorBoxKey.currentContext?.findRenderObject();
+    if (event == null ||
+        box is! RenderBox ||
+        !box.attached ||
+        !_editorScroll.hasClients) {
+      _stopDragScroll();
+      return;
+    }
+    final y = box.globalToLocal(event.position).dy;
+    final h = box.size.height;
+    double delta = 0;
+    if (y > h - _dragEdge) {
+      delta = ((y - (h - _dragEdge)) * 0.4).clamp(4.0, 40.0).toDouble();
+    } else if (y < _dragEdge) {
+      delta = -((_dragEdge - y) * 0.4).clamp(4.0, 40.0).toDouble();
+    }
+    if (delta == 0) return;
+    final position = _editorScroll.position;
+    final target = (_editorScroll.offset + delta)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+    if (target == _editorScroll.offset) return;
+    _editorScroll.jumpTo(target);
+    // The mouse itself has not moved, so the editor would not extend the
+    // selection. Send it a tiny move so it does.
+    _nudgeFlip = !_nudgeFlip;
+    GestureBinding.instance.handlePointerEvent(PointerMoveEvent(
+      timeStamp: event.timeStamp,
+      kind: event.kind,
+      device: event.device,
+      pointer: event.pointer,
+      position: event.position + Offset(0, _nudgeFlip ? 0.5 : 0),
+      buttons: event.buttons,
+    ));
   }
 
   /// Windows: the cursor must always be in the editor. If the editor lost
@@ -615,7 +683,14 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                   children: [
                     _buildToolbar(controller, desktop: true),
                     Expanded(
-                      child: MediaQuery(
+                      child: Listener(
+                        behavior: HitTestBehavior.translucent,
+                        onPointerMove: _onEditorPointerMove,
+                        onPointerUp: (_) => _stopDragScroll(),
+                        onPointerCancel: (_) => _stopDragScroll(),
+                        child: Container(
+                        key: _editorBoxKey,
+                        child: MediaQuery(
                         data: MediaQuery.of(context).copyWith(
                           textScaler: TextScaler.linear(
                             MediaQuery.textScalerOf(context).scale(1) *
@@ -632,6 +707,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                             autoFocus: false,
                             padding: EdgeInsets.fromLTRB(40, 24, 40, 24),
                           ),
+                        ),
+                      ),
                         ),
                       ),
                     ),

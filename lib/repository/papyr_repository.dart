@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/app_database.dart';
 import '../network/sync_manager.dart';
+import 'dirty_chapters.dart';
 
 /// Result of trying to send one pending row to the server.
 enum _Step {
@@ -151,13 +152,41 @@ class PapyrRepository {
     return _resolve('chapter', id);
   }
 
+  /// Chapters whose latest edit is saved here but not on the server yet.
+  final DirtyChapters _dirty = DirtyChapters();
+
+  /// Bumped on every edit, so a slow send of an older edit cannot clear the
+  /// mark of a newer one.
+  final Map<int, int> _dirtyVersion = {};
+
   Future<void> updateChapter(Chapter chapter) async {
     final c = chapter.copyWith(
       id: resolveChapterId(chapter.id),
       storyId: resolveStoryId(chapter.storyId),
     );
     await _db.updateChapter(c);
-    if (c.id > 0) await _sync.pushChapterUpdated(c);
+    if (c.id > 0) {
+      final version = _dirtyVersion[c.id] = (_dirtyVersion[c.id] ?? 0) + 1;
+      await _dirty.add(c.id);
+      final ok = await _sync.pushChapterUpdated(c);
+      if (ok && _dirtyVersion[c.id] == version) await _dirty.remove(c.id);
+    }
+  }
+
+  /// Sends the chapters that were edited while offline (or whose send failed).
+  /// Returns false when the server could not be reached.
+  Future<bool> _flushDirtyChapters() async {
+    for (final id in await _dirty.all()) {
+      final chapter = await _db.getChapterById(id);
+      if (chapter == null) {
+        await _dirty.remove(id);
+        continue;
+      }
+      final version = _dirtyVersion[id] ?? 0;
+      if (!await _sync.pushChapterUpdated(chapter)) return false;
+      if ((_dirtyVersion[id] ?? 0) == version) await _dirty.remove(id);
+    }
+    return true;
   }
 
   Future<void> deleteChapter(Chapter chapter) async {
@@ -345,6 +374,9 @@ class PapyrRepository {
   /// to pull.
   Future<void> refreshStoryData(int storyId) async {
     await syncPending();
+    // Chapter text that could not be sent yet is newer than the server's:
+    // do not pull over it.
+    if ((await _dirty.all()).isNotEmpty) return;
     final id = resolveStoryId(storyId);
     if (id > 0) await _sync.pullStory(id);
   }
@@ -355,6 +387,10 @@ class PapyrRepository {
   Future<Chapter?> refreshChapter(int chapterId) async {
     final id = resolveChapterId(chapterId);
     if (id <= 0) return null;
+    // Edits that never reached the server win over the server's older text.
+    if (await _dirty.contains(id)) {
+      if (!await _flushDirtyChapters()) return _db.getChapterById(id);
+    }
     final chapter = await _sync.pullChapter(id);
     if (chapter != null) await _db.insertChapter(chapter);
     return chapter;
@@ -372,6 +408,9 @@ class PapyrRepository {
   }
 
   Future<void> _runSyncPending() async {
+    // Text written while offline goes first, so a pull can never replace it
+    // with the older server copy.
+    if (!await _flushDirtyChapters()) return;
     for (final s in await _db.getPendingStories()) {
       if (!await _syncStory(s.id)) return;
     }

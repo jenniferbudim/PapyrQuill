@@ -158,7 +158,8 @@ class SyncManager {
     return id;
   }
 
-  Future<void> pushChapterUpdated(Chapter chapter) async {
+  /// Returns true when the server accepted the update.
+  Future<bool> pushChapterUpdated(Chapter chapter) async {
     final r = await _remote.updateChapter(
       chapter.id,
       UpdateChapterRequest(
@@ -170,6 +171,7 @@ class SyncManager {
       ),
     );
     if (r != null) _log('Pushed chapter update: id=${chapter.id}');
+    return r != null;
   }
 
   Future<void> pushChapterDeleted(int chapterId) async {
