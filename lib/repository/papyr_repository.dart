@@ -125,12 +125,44 @@ class PapyrRepository {
     await syncPending();
     final reached = await _sync.pullAllStories();
     if (!reached) return false;
+    // Full sync: every story's chapters, frames, groups and characters, and
+    // the text of every chapter, so nothing has to be opened by hand first.
+    // Skipped while some edit could not be sent (it must not be overwritten).
+    if ((await _dirty.all()).isEmpty) {
+      for (final story in await _db.getAllStories()) {
+        if (story.id <= 0) continue;
+        await _sync.pullStory(story.id);
+        await _pullChapterTexts(story.id);
+      }
+    }
     final waiting = (await _db.getPendingStories()).length +
         (await _db.getPendingFrames()).length +
         (await _db.getPendingGroups()).length +
         (await _db.getPendingChapters()).length +
         (await _db.getPendingCharacters()).length;
     return waiting == 0;
+  }
+
+  /// Fetches the full text of each chapter of a story (the chapter list leaves
+  /// it out) and stores it when it differs from what is on this device.
+  Future<void> _pullChapterTexts(int storyId) async {
+    final local = [
+      for (final c in await _db.getChaptersByStoryId(storyId))
+        if (c.id > 0) c,
+    ];
+    for (var i = 0; i < local.length; i += 4) {
+      final batch = local.skip(i).take(4);
+      await Future.wait([
+        for (final c in batch)
+          () async {
+            final fresh = await _sync.pullChapter(c.id);
+            if (fresh == null || fresh.contentHtml == c.contentHtml) return;
+            // An edit made meanwhile must not be overwritten.
+            if (await _dirty.contains(c.id)) return;
+            await _db.insertChapter(fresh);
+          }(),
+      ]);
+    }
   }
 
   // ── Chapters ─────────────────────────────────────────────────────────────

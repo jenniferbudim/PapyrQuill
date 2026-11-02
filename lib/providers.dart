@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'data/app_database.dart';
@@ -73,6 +75,22 @@ final startupSyncProvider = FutureProvider<void>((ref) async {
   }
   ref.read(syncStatusProvider.notifier).state =
       ok ? SyncStatus.success : SyncStatus.offline;
+
+  // From now on, sync by itself every 45 seconds, so edits made on another
+  // device show up (and edits made here while offline get sent) without
+  // pressing anything.
+  final timer = Timer.periodic(const Duration(seconds: 45), (_) async {
+    if (ref.read(syncStatusProvider) == SyncStatus.syncing) return;
+    bool ok;
+    try {
+      ok = await ref.read(repositoryProvider).syncNow();
+    } catch (_) {
+      ok = false;
+    }
+    ref.read(syncStatusProvider.notifier).state =
+        ok ? SyncStatus.success : SyncStatus.offline;
+  });
+  ref.onDispose(timer.cancel);
 });
 
 /// Replaces HomeViewModel's story list Flow.
