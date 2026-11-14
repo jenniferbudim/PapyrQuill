@@ -75,6 +75,20 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   PointerMoveEvent? _dragEvent;
   Timer? _dragScroller;
   bool _nudgeFlip = false;
+  int? _dragAnchor;
+
+  // Windows: reading the editor's layout (caret positions) to scroll.
+  final GlobalKey _quillKey = GlobalKey();
+  DateTime _ignoreFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  ModalRoute<dynamic>? _route;
+
+  // Windows: find bar (Ctrl+F).
+  bool _findOpen = false;
+  final TextEditingController _findText = TextEditingController();
+  final FocusNode _findFocus = FocusNode(debugLabel: 'find');
+  List<int> _matches = [];
+  int _matchIndex = -1;
+  int _findOrigin = 0;
   StreamSubscription<dynamic>? _changesSub;
   Timer? _saveTimer;
 
@@ -105,10 +119,17 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
         (_) => _keepCursorInEditor(),
       );
     }
+    if (isDesktopPlatform()) HardwareKeyboard.instance.addHandler(_onGlobalKey);
     _guard = LeaveGuardHolder.of(context);
     _previousLeaveGuard = _guard.check;
     _guard.check = _confirmLeave;
     _load();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _route = ModalRoute.of(context);
   }
 
   @override
@@ -125,6 +146,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _changesSub?.cancel();
     _exitListener?.dispose();
     _controller?.dispose();
+    HardwareKeyboard.instance.removeHandler(_onGlobalKey);
+    _controller?.removeListener(_followCaret);
+    _findText.dispose();
+    _findFocus.dispose();
     _focusKeeper?.cancel();
     _dragScroller?.cancel();
     _editorFocus.dispose();
@@ -154,6 +179,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
       selection: const TextSelection.collapsed(offset: 0),
     );
     _controller = controller;
+    if (isDesktopPlatform()) controller.addListener(_followCaret);
     _lastSavedHtml = documentToHtml(controller.document);
     _listenToChanges();
     setState(() {});
@@ -219,6 +245,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     }
     if (inserted < 40 || !_editorScroll.hasClients) return;
     final offset = _editorScroll.offset;
+    _ignoreFollowUntil = DateTime.now().add(const Duration(milliseconds: 800));
     void restore() {
       if (!mounted || !_editorScroll.hasClients) return;
       final target = offset.clamp(
@@ -246,6 +273,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
         event.buttons != kPrimaryButton) {
       return;
     }
+    if (_dragEvent == null) _dragAnchor = _controller?.selection.baseOffset;
     _dragEvent = event;
     _dragScroller ??=
         Timer.periodic(const Duration(milliseconds: 16), (_) => _dragScrollTick());
@@ -255,10 +283,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _dragScroller?.cancel();
     _dragScroller = null;
     _dragEvent = null;
+    _dragAnchor = null;
   }
 
   /// While the mouse button is held near (or beyond) the top or bottom edge of
-  /// the editor, scroll the text and keep extending the selection.
+  /// the editor, scroll the text gently and keep extending the selection to the
+  /// line under the mouse.
   void _dragScrollTick() {
     final event = _dragEvent;
     final box = _editorBoxKey.currentContext?.findRenderObject();
@@ -269,32 +299,307 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
       _stopDragScroll();
       return;
     }
-    final y = box.globalToLocal(event.position).dy;
+    final local = box.globalToLocal(event.position);
     final h = box.size.height;
     double delta = 0;
-    if (y > h - _dragEdge) {
-      delta = ((y - (h - _dragEdge)) * 0.4).clamp(4.0, 40.0).toDouble();
-    } else if (y < _dragEdge) {
-      delta = -((_dragEdge - y) * 0.4).clamp(4.0, 40.0).toDouble();
+    if (local.dy > h - _dragEdge) {
+      delta = ((local.dy - (h - _dragEdge)) * 0.12).clamp(1.5, 14.0).toDouble();
+    } else if (local.dy < _dragEdge) {
+      delta = -((_dragEdge - local.dy) * 0.12).clamp(1.5, 14.0).toDouble();
     }
     if (delta == 0) return;
     final position = _editorScroll.position;
     final target = (_editorScroll.offset + delta)
         .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
-    if (target == _editorScroll.offset) return;
-    _editorScroll.jumpTo(target);
-    // The mouse itself has not moved, so the editor would not extend the
-    // selection. Send it a tiny move so it does.
-    _nudgeFlip = !_nudgeFlip;
-    GestureBinding.instance.handlePointerEvent(PointerMoveEvent(
-      timeStamp: event.timeStamp,
-      kind: event.kind,
-      device: event.device,
-      pointer: event.pointer,
-      position: event.position + Offset(0, _nudgeFlip ? 0.5 : 0),
-      buttons: event.buttons,
-    ));
+    if (target != _editorScroll.offset) _editorScroll.jumpTo(target);
+
+    // The mouse has not moved, so the editor does not extend the selection by
+    // itself: do it for the line now under the mouse.
+    final c = _controller;
+    final anchor = _dragAnchor;
+    if (c == null || anchor == null) return;
+    final inside = Offset(
+      local.dx.clamp(0.0, box.size.width).toDouble(),
+      local.dy.clamp(8.0, h - 8).toDouble(),
+    );
+    final offset = _offsetAtGlobal(box.localToGlobal(inside));
+    if (offset == null) {
+      // Could not read the layout: nudge the editor with a tiny mouse move.
+      _nudgeFlip = !_nudgeFlip;
+      GestureBinding.instance.handlePointerEvent(PointerMoveEvent(
+        timeStamp: event.timeStamp,
+        kind: event.kind,
+        device: event.device,
+        pointer: event.pointer,
+        position: event.position + Offset(0, _nudgeFlip ? 0.5 : 0),
+        buttons: event.buttons,
+      ));
+      return;
+    }
+    if (offset != c.selection.extentOffset) {
+      c.updateSelection(
+        TextSelection(baseOffset: anchor, extentOffset: offset),
+        ChangeSource.local,
+      );
+    }
+  }
+
+  // ── Reading the editor's layout ───────────────────────────────────────────
+  // These reach into flutter_quill's internals, so each one is wrapped: if a
+  // version does not have them the result is null and nothing breaks.
+
+  dynamic get _renderEditor {
+    try {
+      final dynamic state = _quillKey.currentState;
+      final dynamic raw = state?.editableTextKey.currentState;
+      return raw?.renderEditor;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Where the caret at document [offset] is, in the scrolling text's own
+  /// coordinates (0 = top of the text).
+  Rect? _caretRect(int offset) {
+    try {
+      final r = _renderEditor;
+      if (r == null) return null;
+      return r.getLocalRectForCaret(TextPosition(offset: offset)) as Rect;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The document offset under a screen position.
+  int? _offsetAtGlobal(Offset global) {
+    try {
+      final r = _renderEditor;
+      if (r == null) return null;
+      return (r.getPositionForOffset(global) as TextPosition).offset;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Shift+Up/Down (and any other caret move) scrolls to keep the moving end
+  /// of the selection in view, smoothly.
+  void _followCaret() {
+    if (!_editorFocus.hasFocus || _dragEvent != null) return;
+    if (DateTime.now().isBefore(_ignoreFollowUntil)) return;
+    final c = _controller;
+    if (c == null || !_editorScroll.hasClients) return;
+    final extent = c.selection.extentOffset;
+    if (extent < 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_editorScroll.hasClients) return;
+      final rect = _caretRect(extent);
+      if (rect == null) return;
+      final pos = _editorScroll.position;
+      final bottomEdge = pos.pixels + pos.viewportDimension - 60;
+      final topEdge = pos.pixels + 30;
+      double? target;
+      if (rect.bottom > bottomEdge) {
+        target = rect.bottom - pos.viewportDimension + 60;
+      } else if (rect.top < topEdge) {
+        target = rect.top - 30;
+      }
+      if (target == null) return;
+      target = target.clamp(pos.minScrollExtent, pos.maxScrollExtent).toDouble();
+      if ((target - pos.pixels).abs() < 1) return;
+      unawaited(_editorScroll.animateTo(
+        target,
+        duration: const Duration(milliseconds: 110),
+        curve: Curves.easeOut,
+      ));
+    });
+  }
+
+  // ── Find (Ctrl+F) ─────────────────────────────────────────────────────────
+
+  bool _onGlobalKey(KeyEvent event) {
+    if (event is KeyUpEvent || !mounted) return false;
+    if (_route?.isCurrent != true || !_editorFocus.canRequestFocus) {
+      return false;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    final key = event.logicalKey;
+    if (event is KeyDownEvent &&
+        key == LogicalKeyboardKey.keyF &&
+        keyboard.isControlPressed &&
+        !keyboard.isAltPressed) {
+      _openFind();
+      return true;
+    }
+    if (!_findOpen) return false;
+    if (event is KeyDownEvent && key == LogicalKeyboardKey.escape) {
+      _closeFind();
+      return true;
+    }
+    final isEnter =
+        key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter;
+    final inFind = _findFocus.hasFocus || _editorFocus.hasFocus;
+    if ((isEnter && inFind && !keyboard.isControlPressed) ||
+        key == LogicalKeyboardKey.f3) {
+      _stepMatch(keyboard.isShiftPressed ? -1 : 1);
+      return true;
+    }
+    return false;
+  }
+
+  void _openFind() {
+    final c = _controller;
+    if (c == null) return;
+    final sel = c.selection;
+    if (!sel.isCollapsed) {
+      final text = c.document.toPlainText();
+      final from = sel.start.clamp(0, text.length).toInt();
+      final to = sel.end.clamp(0, text.length).toInt();
+      final picked = text.substring(from, to);
+      if (picked.isNotEmpty && !picked.contains('\n') && picked.length < 80) {
+        _findText.text = picked;
+      }
+    }
+    _findOrigin = sel.start < 0 ? 0 : sel.start;
+    setState(() => _findOpen = true);
+    _updateMatches(jump: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _findFocus.requestFocus();
+      _findText.selection =
+          TextSelection(baseOffset: 0, extentOffset: _findText.text.length);
+    });
+  }
+
+  void _closeFind() {
+    setState(() => _findOpen = false);
+    _editorFocus.requestFocus();
+  }
+
+  void _updateMatches({bool jump = true}) {
+    final c = _controller;
+    final query = _findText.text;
+    if (c == null || query.isEmpty) {
+      setState(() {
+        _matches = [];
+        _matchIndex = -1;
+      });
+      return;
+    }
+    final text = c.document.toPlainText().toLowerCase();
+    final q = query.toLowerCase();
+    final found = <int>[];
+    var i = text.indexOf(q);
+    while (i >= 0) {
+      found.add(i);
+      i = text.indexOf(q, i + q.length);
+    }
+    var index = found.indexWhere((o) => o >= _findOrigin);
+    if (index < 0 && found.isNotEmpty) index = 0;
+    setState(() {
+      _matches = found;
+      _matchIndex = found.isEmpty ? -1 : index;
+    });
+    if (jump && _matchIndex >= 0) _goToMatch(_matchIndex, focusEditor: false);
+  }
+
+  void _stepMatch(int delta) {
+    if (_matches.isEmpty) {
+      _updateMatches();
+      return;
+    }
+    final next = (_matchIndex + delta) % _matches.length;
+    _goToMatch(next, focusEditor: true);
+  }
+
+  /// Selects the match and scrolls so it is at the TOP of the editor, clear of
+  /// the find bar at the bottom.
+  void _goToMatch(int index, {required bool focusEditor}) {
+    final c = _controller;
+    if (c == null || index < 0 || index >= _matches.length) return;
+    final offset = _matches[index];
+    final length = _findText.text.length;
+    setState(() => _matchIndex = index);
+    _ignoreFollowUntil = DateTime.now().add(const Duration(milliseconds: 900));
+    c.updateSelection(
+      TextSelection(baseOffset: offset, extentOffset: offset + length),
+      ChangeSource.local,
+    );
+    // Selected text is only drawn while the editor has the keyboard focus.
+    if (focusEditor) _editorFocus.requestFocus();
+    // The editor scrolls to the selection by itself first; then put the match
+    // near the top, after that has settled.
+    void toTop() {
+      if (!mounted || !_editorScroll.hasClients) return;
+      final rect = _caretRect(offset);
+      if (rect == null) return;
+      final pos = _editorScroll.position;
+      final target =
+          (rect.top - 70).clamp(pos.minScrollExtent, pos.maxScrollExtent);
+      unawaited(_editorScroll.animateTo(
+        target.toDouble(),
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+      ));
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => toTop());
+    });
+  }
+
+  Widget _buildFindBar() {
+    final hasQuery = _findText.text.isNotEmpty;
+    final label = !hasQuery
+        ? ''
+        : _matches.isEmpty
+            ? 'No results'
+            : '${_matchIndex + 1} / ${_matches.length}';
+    return Material(
+      elevation: 4,
+      color: cardBeige,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        child: Row(
+          children: [
+            const Icon(Icons.search, size: 18, color: darkPink),
+            const SizedBox(width: 6),
+            Expanded(
+              child: TextField(
+                controller: _findText,
+                focusNode: _findFocus,
+                onChanged: (_) {
+                  _findOrigin = _controller?.selection.start ?? 0;
+                  _updateMatches();
+                },
+                decoration: const InputDecoration(
+                  hintText: 'Find in this chapter',
+                  border: InputBorder.none,
+                  isDense: true,
+                ),
+              ),
+            ),
+            Text(label, style: const TextStyle(fontSize: 13, color: darkPink)),
+            IconButton(
+              tooltip: 'Previous (Shift+Enter)',
+              icon: const Icon(Icons.keyboard_arrow_up, color: darkPink),
+              onPressed: () => _stepMatch(-1),
+            ),
+            IconButton(
+              tooltip: 'Next (Enter)',
+              icon: const Icon(Icons.keyboard_arrow_down, color: darkPink),
+              onPressed: () => _stepMatch(1),
+            ),
+            IconButton(
+              tooltip: 'Close (Esc)',
+              icon: const Icon(Icons.close, color: darkPink),
+              onPressed: _closeFind,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Windows: the cursor must always be in the editor. If the editor lost
@@ -683,6 +988,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                   children: [
                     _buildToolbar(controller, desktop: true),
                     Expanded(
+                      child: Stack(
+                        children: [
+                      Positioned.fill(
                       child: Listener(
                         behavior: HitTestBehavior.translucent,
                         onPointerMove: _onEditorPointerMove,
@@ -698,6 +1006,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                           ),
                         ),
                         child: QuillEditor.basic(
+                          key: _quillKey,
                           controller: controller,
                           focusNode: _editorFocus,
                           scrollController: _editorScroll,
@@ -710,6 +1019,16 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                         ),
                       ),
                         ),
+                      ),
+                      ),
+                      if (_findOpen)
+                        Positioned(
+                          right: 24,
+                          bottom: 14,
+                          width: 420,
+                          child: _buildFindBar(),
+                        ),
+                        ],
                       ),
                     ),
                   ],
