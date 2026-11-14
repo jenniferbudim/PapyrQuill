@@ -77,6 +77,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   bool _nudgeFlip = false;
   int? _dragAnchor;
 
+  /// Shift+Up/Down: the x position the caret keeps while moving by lines.
+  double? _goalX;
+  int? _goalExtent;
+
   // Windows: reading the editor's layout (caret positions) to scroll.
   final GlobalKey _quillKey = GlobalKey();
   DateTime _ignoreFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
@@ -147,7 +151,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _exitListener?.dispose();
     _controller?.dispose();
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
-    _controller?.removeListener(_followCaret);
     _findText.dispose();
     _findFocus.dispose();
     _focusKeeper?.cancel();
@@ -174,12 +177,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     if (!mounted || local == null) return;
     _chapter = local;
 
-    final controller = QuillController(
+    final controller = _GuardedController(
       document: htmlToDocument(local.contentHtml),
       selection: const TextSelection.collapsed(offset: 0),
     );
     _controller = controller;
-    if (isDesktopPlatform()) controller.addListener(_followCaret);
     _lastSavedHtml = documentToHtml(controller.document);
     _listenToChanges();
     setState(() {});
@@ -284,6 +286,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     _dragScroller = null;
     _dragEvent = null;
     _dragAnchor = null;
+    final c = _controller;
+    if (c is _GuardedController) c.blockExternal = false;
   }
 
   /// While the mouse button is held near (or beyond) the top or bottom edge of
@@ -307,41 +311,34 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     } else if (local.dy < _dragEdge) {
       delta = -((_dragEdge - local.dy) * 0.12).clamp(1.5, 14.0).toDouble();
     }
-    if (delta == 0) return;
-    final position = _editorScroll.position;
-    final target = (_editorScroll.offset + delta)
-        .clamp(position.minScrollExtent, position.maxScrollExtent)
-        .toDouble();
-    if (target != _editorScroll.offset) _editorScroll.jumpTo(target);
+    if (delta != 0) {
+      final position = _editorScroll.position;
+      final target = (_editorScroll.offset + delta)
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+      if (target != _editorScroll.offset) _editorScroll.jumpTo(target);
+    }
 
-    // The mouse has not moved, so the editor does not extend the selection by
-    // itself: do it for the line now under the mouse.
     final c = _controller;
     final anchor = _dragAnchor;
     if (c == null || anchor == null) return;
-    final inside = Offset(
+    // Inside the editor, the editor itself handles the drag. Near or beyond an
+    // edge we take over completely (and ignore the editor's own updates, which
+    // would fight ours and make the selection flicker).
+    final inside = local.dy >= _dragEdge &&
+        local.dy <= h - _dragEdge &&
+        local.dx >= 0 &&
+        local.dx <= box.size.width;
+    if (c is _GuardedController) c.blockExternal = !inside;
+    if (inside) return;
+    final clamped = Offset(
       local.dx.clamp(0.0, box.size.width).toDouble(),
       local.dy.clamp(8.0, h - 8).toDouble(),
     );
-    final offset = _offsetAtGlobal(box.localToGlobal(inside));
-    if (offset == null) {
-      // Could not read the layout: nudge the editor with a tiny mouse move.
-      _nudgeFlip = !_nudgeFlip;
-      GestureBinding.instance.handlePointerEvent(PointerMoveEvent(
-        timeStamp: event.timeStamp,
-        kind: event.kind,
-        device: event.device,
-        pointer: event.pointer,
-        position: event.position + Offset(0, _nudgeFlip ? 0.5 : 0),
-        buttons: event.buttons,
-      ));
-      return;
-    }
-    if (offset != c.selection.extentOffset) {
-      c.updateSelection(
-        TextSelection(baseOffset: anchor, extentOffset: offset),
-        ChangeSource.local,
-      );
+    final offset = _offsetAtGlobal(box.localToGlobal(clamped));
+    if (offset == null || offset == c.selection.extentOffset) return;
+    if (c is _GuardedController) {
+      c.setSelectionDirect(TextSelection(baseOffset: anchor, extentOffset: offset));
     }
   }
 
@@ -382,37 +379,67 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     }
   }
 
-  /// Shift+Up/Down (and any other caret move) scrolls to keep the moving end
-  /// of the selection in view, smoothly.
-  void _followCaret() {
-    if (!_editorFocus.hasFocus || _dragEvent != null) return;
-    if (DateTime.now().isBefore(_ignoreFollowUntil)) return;
-    final c = _controller;
-    if (c == null || !_editorScroll.hasClients) return;
-    final extent = c.selection.extentOffset;
-    if (extent < 0) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_editorScroll.hasClients) return;
+  /// Shift+Up/Down/PageUp/PageDown, done here so the selection moves one line
+  /// at a time and the view follows the moving end, like Google Docs. Returns
+  /// false (so the editor handles the key) if the layout can't be read.
+  bool _extendSelectionByKey(LogicalKeyboardKey key) {
+    try {
+      final c = _controller;
+      final r = _renderEditor;
+      if (c == null || r == null || !_editorScroll.hasClients) return false;
+      final sel = c.selection;
+      if (!sel.isValid) return false;
+      final extent = sel.extentOffset;
       final rect = _caretRect(extent);
-      if (rect == null) return;
+      if (rect == null) return false;
       final pos = _editorScroll.position;
-      final bottomEdge = pos.pixels + pos.viewportDimension - 60;
-      final topEdge = pos.pixels + 30;
-      double? target;
-      if (rect.bottom > bottomEdge) {
-        target = rect.bottom - pos.viewportDimension + 60;
-      } else if (rect.top < topEdge) {
-        target = rect.top - 30;
+      final lineH = rect.height <= 0 ? 20.0 : rect.height;
+      final page = key == LogicalKeyboardKey.pageUp ||
+          key == LogicalKeyboardKey.pageDown;
+      final down = key == LogicalKeyboardKey.arrowDown ||
+          key == LogicalKeyboardKey.pageDown;
+      if (_goalX == null || _goalExtent != extent) _goalX = rect.left;
+      final step = page ? pos.viewportDimension - 2 * lineH : lineH;
+      final y = down ? rect.top + step + lineH / 2 : rect.top - step + lineH / 2;
+      final last = c.document.length - 1;
+      var newExtent = 0;
+      if (y >= 0) {
+        final global = (r as RenderBox).localToGlobal(Offset(_goalX!, y));
+        final o = _offsetAtGlobal(global);
+        if (o == null) return false;
+        newExtent = o;
       }
-      if (target == null) return;
-      target = target.clamp(pos.minScrollExtent, pos.maxScrollExtent).toDouble();
-      if ((target - pos.pixels).abs() < 1) return;
-      unawaited(_editorScroll.animateTo(
-        target,
-        duration: const Duration(milliseconds: 110),
-        curve: Curves.easeOut,
-      ));
-    });
+      if (down && newExtent <= extent) newExtent = last;
+      if (!down && newExtent >= extent) newExtent = 0;
+      newExtent = newExtent.clamp(0, last < 0 ? 0 : last).toInt();
+      c.updateSelection(
+        TextSelection(baseOffset: sel.baseOffset, extentOffset: newExtent),
+        ChangeSource.local,
+      );
+      _goalExtent = newExtent;
+
+      // Keep the moving end in view, moving the page as little as needed.
+      final nr = _caretRect(newExtent);
+      if (nr != null) {
+        double? target;
+        if (page) {
+          target = pos.pixels + (down ? step : -step);
+        } else if (nr.bottom > pos.pixels + pos.viewportDimension - 40) {
+          target = nr.bottom - pos.viewportDimension + 40;
+        } else if (nr.top < pos.pixels + 20) {
+          target = nr.top - 20;
+        }
+        if (target != null) {
+          _editorScroll.jumpTo(
+            target.clamp(pos.minScrollExtent, pos.maxScrollExtent).toDouble(),
+          );
+        }
+      }
+      return true;
+    } catch (e) {
+      debugPrint('Shift+arrow selection: $e');
+      return false;
+    }
   }
 
   // ── Find (Ctrl+F) ─────────────────────────────────────────────────────────
@@ -430,6 +457,17 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
         !keyboard.isAltPressed) {
       _openFind();
       return true;
+    }
+    if ((event is KeyDownEvent || event is KeyRepeatEvent) &&
+        keyboard.isShiftPressed &&
+        !keyboard.isControlPressed &&
+        !keyboard.isAltPressed &&
+        _editorFocus.hasFocus &&
+        (key == LogicalKeyboardKey.arrowUp ||
+            key == LogicalKeyboardKey.arrowDown ||
+            key == LogicalKeyboardKey.pageUp ||
+            key == LogicalKeyboardKey.pageDown)) {
+      if (_extendSelectionByKey(key)) return true;
     }
     if (!_findOpen) return false;
     if (event is KeyDownEvent && key == LogicalKeyboardKey.escape) {
@@ -1010,11 +1048,26 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                           controller: controller,
                           focusNode: _editorFocus,
                           scrollController: _editorScroll,
-                          config: const QuillEditorConfig(
+                          config: QuillEditorConfig(
                             placeholder: 'Start writing your story…',
                             expands: true,
                             autoFocus: false,
-                            padding: EdgeInsets.fromLTRB(40, 24, 40, 24),
+                            padding: const EdgeInsets.fromLTRB(40, 24, 40, 24),
+                            // Ctrl+F opens this app's find bar, not the
+                            // editor's own search bar.
+                            customShortcuts: const {
+                              SingleActivator(LogicalKeyboardKey.keyF,
+                                  control: true): _OpenFindIntent(),
+                            },
+                            customActions: {
+                              _OpenFindIntent:
+                                  CallbackAction<_OpenFindIntent>(
+                                onInvoke: (_) {
+                                  _openFind();
+                                  return null;
+                                },
+                              ),
+                            },
                           ),
                         ),
                       ),
@@ -1198,5 +1251,31 @@ class _ToolbarButton extends StatelessWidget {
       ),
       icon: Icon(icon, color: darkPink),
     );
+  }
+}
+
+class _OpenFindIntent extends Intent {
+  const _OpenFindIntent();
+}
+
+/// A QuillController that can be told to ignore the editor's own selection
+/// updates, so that while the mouse is dragged past the edge of the editor only
+/// this app's updates apply (otherwise the two fight and it flickers).
+class _GuardedController extends QuillController {
+  _GuardedController({required super.document, required super.selection});
+
+  bool blockExternal = false;
+
+  @override
+  void updateSelection(TextSelection textSelection, ChangeSource source) {
+    if (blockExternal) return;
+    super.updateSelection(textSelection, source);
+  }
+
+  void setSelectionDirect(TextSelection selection) {
+    final was = blockExternal;
+    blockExternal = false;
+    super.updateSelection(selection, ChangeSource.local);
+    blockExternal = was;
   }
 }
